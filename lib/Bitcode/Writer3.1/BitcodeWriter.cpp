@@ -16,6 +16,7 @@
 #include "LLVMBitCodes.h"
 #include "ValueEnumerator.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/Instructions.h"
@@ -558,89 +559,126 @@ static uint64_t GetOptimizationFlags(const Value *V) {
   return Flags;
 }
 
-static void WriteMDNode(const MDNode *N,
-                        const ValueEnumerator &VE,
-                        BitstreamWriter &Stream,
-                        SmallVector<uint64_t, 64> &Record) {
+static void WriteMDTuple(const MDTuple *N, const ValueEnumerator &VE,
+                         BitstreamWriter &Stream,
+                         SmallVectorImpl<uint64_t> &Record, unsigned Abbrev) {
   for (unsigned i = 0, e = N->getNumOperands(); i != e; ++i) {
-    if (N->getOperand(i)) {
-      Record.push_back(VE.getTypeID(N->getOperand(i)->getType()));
-      Record.push_back(VE.getValueID(N->getOperand(i)));
-    } else {
-      Record.push_back(VE.getTypeID(Type::getVoidTy(N->getContext())));
+    Metadata *MD = N->getOperand(i);
+    assert(!(MD && isa<LocalAsMetadata>(MD)) &&
+           "Unexpected function-local metadata");
+    if (!MD) {
+      // TODO(srhines): I don't believe this case can exist for RS.
+      Record.push_back(VE.getTypeID(llvm::Type::getVoidTy(N->getContext())));
       Record.push_back(0);
+    } else if (const auto *MDC = dyn_cast<ConstantAsMetadata>(MD)) {
+      Record.push_back(VE.getTypeID(MDC->getType()));
+      Record.push_back(VE.getValueID(MDC->getValue()));
+    } else {
+      Record.push_back(VE.getTypeID(
+          llvm::Type::getMetadataTy(N->getContext())));
+      Record.push_back(VE.getMetadataID(MD));
     }
   }
-  unsigned MDCode = N->isFunctionLocal() ? bitc::METADATA_FN_NODE :
-                                           bitc::METADATA_NODE;
-  Stream.EmitRecord(MDCode, Record, 0);
+  Stream.EmitRecord(bitc::METADATA_NODE, Record, Abbrev);
+  Record.clear();
+}
+
+static void WriteValueAsMetadata(const ValueAsMetadata *MD,
+                                 const ValueEnumerator &VE,
+                                 BitstreamWriter &Stream,
+                                 SmallVectorImpl<uint64_t> &Record) {
+  // Mimic an MDNode with a value as one operand.
+  Value *V = MD->getValue();
+  Record.push_back(VE.getTypeID(V->getType()));
+  Record.push_back(VE.getValueID(V));
+  Stream.EmitRecord(bitc::METADATA_NODE, Record, 0);
   Record.clear();
 }
 
 static void WriteModuleMetadata(const Module *M,
                                 const ValueEnumerator &VE,
                                 BitstreamWriter &Stream) {
-  const ValueEnumerator::ValueList &Vals = VE.getMDValues();
-  bool StartedMetadataBlock = false;
+
+  const auto &MDs = VE.getMDs();
+  if (MDs.empty() && M->named_metadata_empty())
+    return;
+  // RenderScript files *ALWAYS* have metadata!
+  Stream.EnterSubblock(bitc::METADATA_BLOCK_ID, 3);
   unsigned MDSAbbrev = 0;
-  SmallVector<uint64_t, 64> Record;
-  for (unsigned i = 0, e = Vals.size(); i != e; ++i) {
-
-    if (const MDNode *N = dyn_cast<MDNode>(Vals[i].first)) {
-      if (!N->isFunctionLocal() || !N->getFunction()) {
-        if (!StartedMetadataBlock) {
-          Stream.EnterSubblock(bitc::METADATA_BLOCK_ID, 3);
-          StartedMetadataBlock = true;
-        }
-        WriteMDNode(N, VE, Stream, Record);
-      }
-    } else if (const MDString *MDS = dyn_cast<MDString>(Vals[i].first)) {
-      if (!StartedMetadataBlock)  {
-        Stream.EnterSubblock(bitc::METADATA_BLOCK_ID, 3);
-
-        // Abbrev for METADATA_STRING.
-        BitCodeAbbrev *Abbv = new BitCodeAbbrev();
-        Abbv->Add(BitCodeAbbrevOp(bitc::METADATA_STRING));
-        Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Array));
-        Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 8));
-        MDSAbbrev = Stream.EmitAbbrev(Abbv);
-        StartedMetadataBlock = true;
-      }
-
-      // Code: [strchar x N]
-      Record.append(MDS->begin(), MDS->end());
-
-      // Emit the finished record.
-      Stream.EmitRecord(bitc::METADATA_STRING, Record, MDSAbbrev);
-      Record.clear();
-    }
+  if (VE.hasMDString()) {
+    // Abbrev for METADATA_STRING.
+    BitCodeAbbrev *Abbv = new BitCodeAbbrev();
+    Abbv->Add(BitCodeAbbrevOp(bitc::METADATA_STRING));
+    Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Array));
+    Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 8));
+    MDSAbbrev = Stream.EmitAbbrev(Abbv);
   }
-
-  // Write named metadata.
-  for (Module::const_named_metadata_iterator I = M->named_metadata_begin(),
-       E = M->named_metadata_end(); I != E; ++I) {
-    const NamedMDNode *NMD = I;
-    if (!StartedMetadataBlock)  {
-      Stream.EnterSubblock(bitc::METADATA_BLOCK_ID, 3);
-      StartedMetadataBlock = true;
+  unsigned MDLocationAbbrev = 0;
+  if (VE.hasDILocation()) {
+    // TODO(srhines): Should be unreachable for RenderScript.
+    // Abbrev for METADATA_LOCATION.
+    //
+    // Assume the column is usually under 128, and always output the inlined-at
+    // location (it's never more expensive than building an array size 1).
+    BitCodeAbbrev *Abbv = new BitCodeAbbrev();
+    Abbv->Add(BitCodeAbbrevOp(bitc::METADATA_LOCATION));
+    Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 1));
+    Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 6));
+    Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 8));
+    Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 6));
+    Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 6));
+    MDLocationAbbrev = Stream.EmitAbbrev(Abbv);
+  }
+  unsigned NameAbbrev = 0;
+  if (!M->named_metadata_empty()) {
+    // Abbrev for METADATA_NAME.
+    BitCodeAbbrev *Abbv = new BitCodeAbbrev();
+    Abbv->Add(BitCodeAbbrevOp(bitc::METADATA_NAME));
+    Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Array));
+    Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 8));
+    NameAbbrev = Stream.EmitAbbrev(Abbv);
+  }
+  unsigned MDTupleAbbrev = 0;
+  //unsigned GenericDebugNodeAbbrev = 0;
+  SmallVector<uint64_t, 64> Record;
+  for (const Metadata *MD : MDs) {
+    if (const MDNode *N = dyn_cast<MDNode>(MD)) {
+      switch (N->getMetadataID()) {
+      default:
+        llvm_unreachable("Invalid MDNode subclass");
+#define HANDLE_SPECIALIZED_MDNODE_LEAF(CLASS)
+#define HANDLE_MDNODE_LEAF(CLASS)                                              \
+  case Metadata::CLASS##Kind:                                                  \
+    Write##CLASS(cast<CLASS>(N), VE, Stream, Record, CLASS##Abbrev);           \
+    continue;
+#include "llvm/IR/Metadata.def"
+      }
     }
-
-    // Write name.
-    StringRef Str = NMD->getName();
-    for (unsigned i = 0, e = Str.size(); i != e; ++i)
-      Record.push_back(Str[i]);
-    Stream.EmitRecord(bitc::METADATA_NAME, Record, 0/*TODO*/);
+    if (const auto *MDC = dyn_cast<ConstantAsMetadata>(MD)) {
+      WriteValueAsMetadata(MDC, VE, Stream, Record);
+      continue;
+    }
+    const MDString *MDS = cast<MDString>(MD);
+    // Code: [strchar x N]
+    Record.append(MDS->bytes_begin(), MDS->bytes_end());
+    // Emit the finished record.
+    Stream.EmitRecord(bitc::METADATA_STRING, Record, MDSAbbrev);
     Record.clear();
-
+  }
+  // Write named metadata.
+  for (const NamedMDNode &NMD : M->named_metadata()) {
+    // Write name.
+    StringRef Str = NMD.getName();
+    Record.append(Str.bytes_begin(), Str.bytes_end());
+    Stream.EmitRecord(bitc::METADATA_NAME, Record, NameAbbrev);
+    Record.clear();
     // Write named metadata operands.
-    for (unsigned i = 0, e = NMD->getNumOperands(); i != e; ++i)
-      Record.push_back(VE.getValueID(NMD->getOperand(i)));
+    for (const MDNode *N : NMD.operands())
+      Record.push_back(VE.getMetadataID(N));
     Stream.EmitRecord(bitc::METADATA_NAMED_NODE, Record, 0);
     Record.clear();
   }
-
-  if (StartedMetadataBlock)
-    Stream.ExitBlock();
+  Stream.ExitBlock();
 }
 
 static void WriteFunctionLocalMetadata(const Function &F,
@@ -648,17 +686,16 @@ static void WriteFunctionLocalMetadata(const Function &F,
                                        BitstreamWriter &Stream) {
   bool StartedMetadataBlock = false;
   SmallVector<uint64_t, 64> Record;
-  const SmallVector<const MDNode *, 8> &Vals = VE.getFunctionLocalMDValues();
-  for (unsigned i = 0, e = Vals.size(); i != e; ++i)
-    if (const MDNode *N = Vals[i])
-      if (N->isFunctionLocal() && N->getFunction() == &F) {
-        if (!StartedMetadataBlock) {
-          Stream.EnterSubblock(bitc::METADATA_BLOCK_ID, 3);
-          StartedMetadataBlock = true;
-        }
-        WriteMDNode(N, VE, Stream, Record);
-      }
-      
+  const SmallVectorImpl<const LocalAsMetadata *> &MDs = 
+      VE.getFunctionLocalMDValues();
+  for (unsigned i = 0, e = MDs.size(); i != e; ++i) {
+    assert(MDs[i] && "Expected valid function-local metadata");
+    if (!StartedMetadataBlock) {
+      Stream.EnterSubblock(bitc::METADATA_BLOCK_ID, 3);
+      StartedMetadataBlock = true;
+    }
+    WriteValueAsMetadata(MDs[i], VE, Stream, Record);
+  }
   if (StartedMetadataBlock)
     Stream.ExitBlock();
 }
@@ -686,7 +723,7 @@ static void WriteMetadataAttachment(const Function &F,
       
       for (unsigned i = 0, e = MDs.size(); i != e; ++i) {
         Record.push_back(MDs[i].first);
-        Record.push_back(VE.getValueID(MDs[i].second));
+        Record.push_back(VE.getMetadataID(MDs[i].second));
       }
       Stream.EmitRecord(bitc::METADATA_ATTACHMENT, Record, 0);
       Record.clear();
@@ -1403,7 +1440,7 @@ static void WriteFunction(const Function &F, ValueEnumerator &VE,
 
   bool NeedsMetadataAttachment = false;
   
-  DebugLoc LastDL;
+  DILocation *LastDL = nullptr;
   
   // Finally, emit all the instructions, in order.
   for (Function::const_iterator BB = F.begin(), E = F.end(); BB != E; ++BB)
@@ -1418,25 +1455,29 @@ static void WriteFunction(const Function &F, ValueEnumerator &VE,
       NeedsMetadataAttachment |= I->hasMetadataOtherThanDebugLoc();
       
       // If the instruction has a debug location, emit it.
-      DebugLoc DL = I->getDebugLoc();
-      if (DL.isUnknown()) {
-        // nothing todo.
-      } else if (DL == LastDL) {
+      DILocation *DL = I->getDebugLoc();
+      if (!DL)
+        continue;
+
+      if (DL == LastDL) {
         // Just repeat the same debug loc as last time.
         Stream.EmitRecord(bitc::FUNC_CODE_DEBUG_LOC_AGAIN, Vals);
-      } else {
-        MDNode *Scope, *IA;
-        DL.getScopeAndInlinedAt(Scope, IA, I->getContext());
-        
-        Vals.push_back(DL.getLine());
-        Vals.push_back(DL.getCol());
-        Vals.push_back(Scope ? VE.getValueID(Scope)+1 : 0);
-        Vals.push_back(IA ? VE.getValueID(IA)+1 : 0);
-        Stream.EmitRecord(bitc::FUNC_CODE_DEBUG_LOC, Vals);
-        Vals.clear();
-        
-        LastDL = DL;
+        continue;
       }
+
+      MDNode *Scope, *IA;
+        
+      Vals.push_back(DL->getLine());
+      Vals.push_back(DL->getColumn());
+      Vals.push_back(VE.getMetadataOrNullID(DL->getScope()));
+      Vals.push_back(VE.getMetadataOrNullID(DL->getInlinedAt()));
+      Stream.EmitRecord(bitc::FUNC_CODE_DEBUG_LOC, Vals);
+      Vals.clear();
+
+      Stream.EmitRecord(bitc::FUNC_CODE_DEBUG_LOC, Vals);
+      Vals.clear();
+        
+      LastDL = DL;
     }
 
   // Emit names for all the instructions etc.
