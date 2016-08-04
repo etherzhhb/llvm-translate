@@ -11,17 +11,17 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "llvm/Bitcode/ReaderWriter.h"
-#include "llvm/Bitcode/BitstreamWriter.h"
-#include "llvm/Bitcode/LLVMBitCodes.h"
+#include "ReaderWriter.h"
+#include "BitstreamWriter.h"
+#include "LLVMBitCodes.h"
 #include "ValueEnumerator.h"
-#include "llvm/Constants.h"
-#include "llvm/DerivedTypes.h"
-#include "llvm/InlineAsm.h"
-#include "llvm/Instructions.h"
-#include "llvm/Module.h"
-#include "llvm/Operator.h"
-#include "llvm/ValueSymbolTable.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/InlineAsm.h"
+#include "llvm/IR/Instructions.h"
+#include "llvm/IR/Module.h"
+#include "llvm/IR/Operator.h"
+#include "llvm/IR/ValueSymbolTable.h"
 #include "llvm/ADT/Triple.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -31,12 +31,9 @@
 #include <cctype>
 #include <map>
 using namespace llvm;
+using namespace ver_3_1;
 
-static cl::opt<bool>
-EnablePreserveUseListOrdering("enable-bc-uselist-preserve",
-                              cl::desc("Turn on experimental support for "
-                                       "use-list order preservation."),
-                              cl::init(false), cl::Hidden);
+static const bool EnablePreserveUseListOrdering = true;
 
 /// These are manifest constants used by the bitcode writer. They do not need to
 /// be kept in sync with the reader, but need to be consistent within this file.
@@ -126,13 +123,13 @@ static unsigned GetEncodedRMWOperation(AtomicRMWInst::BinOp Op) {
 
 static unsigned GetEncodedOrdering(AtomicOrdering Ordering) {
   switch (Ordering) {
-  case NotAtomic: return bitc::ORDERING_NOTATOMIC;
-  case Unordered: return bitc::ORDERING_UNORDERED;
-  case Monotonic: return bitc::ORDERING_MONOTONIC;
-  case Acquire: return bitc::ORDERING_ACQUIRE;
-  case Release: return bitc::ORDERING_RELEASE;
-  case AcquireRelease: return bitc::ORDERING_ACQREL;
-  case SequentiallyConsistent: return bitc::ORDERING_SEQCST;
+  case AtomicOrdering::NotAtomic: return bitc::ORDERING_NOTATOMIC;
+  case AtomicOrdering::Unordered: return bitc::ORDERING_UNORDERED;
+  case AtomicOrdering::Monotonic: return bitc::ORDERING_MONOTONIC;
+  case AtomicOrdering::Acquire: return bitc::ORDERING_ACQUIRE;
+  case AtomicOrdering::Release: return bitc::ORDERING_RELEASE;
+  case AtomicOrdering::AcquireRelease: return bitc::ORDERING_ACQREL;
+  case AtomicOrdering::SequentiallyConsistent: return bitc::ORDERING_SEQCST;
   }
   llvm_unreachable("Invalid ordering");
 }
@@ -163,27 +160,32 @@ static void WriteStringRecord(unsigned Code, StringRef Str,
 // Emit information about parameter attributes.
 static void WriteAttributeTable(const ValueEnumerator &VE,
                                 BitstreamWriter &Stream) {
-  const std::vector<AttrListPtr> &Attrs = VE.getAttributes();
+  const std::vector<AttributeSet> &Attrs = VE.getAttributes();
   if (Attrs.empty()) return;
 
   Stream.EnterSubblock(bitc::PARAMATTR_BLOCK_ID, 3);
 
   SmallVector<uint64_t, 64> Record;
   for (unsigned i = 0, e = Attrs.size(); i != e; ++i) {
-    const AttrListPtr &A = Attrs[i];
+    const AttributeSet &A = Attrs[i];
     for (unsigned i = 0, e = A.getNumSlots(); i != e; ++i) {
-      const AttributeWithIndex &PAWI = A.getSlot(i);
-      Record.push_back(PAWI.Index);
+      unsigned SlotIndex = A.getSlotIndex(i);
+      Record.push_back(SlotIndex);
 
       // FIXME: remove in LLVM 3.0
       // Store the alignment in the bitcode as a 16-bit raw value instead of a
       // 5-bit log2 encoded value. Shift the bits above the alignment up by
       // 11 bits.
-      uint64_t FauxAttr = PAWI.Attrs.Raw() & 0xffff;
-      if (PAWI.Attrs & Attribute::Alignment)
-        FauxAttr |= (1ull<<16)<<
-            (((PAWI.Attrs & Attribute::Alignment).Raw()-1) >> 16);
-      FauxAttr |= (PAWI.Attrs.Raw() & (0x3FFull << 21)) << 11;
+      uint64_t RawAttr = A.Raw(SlotIndex);
+      uint64_t FauxAttr = RawAttr & 0xffff;
+      Attribute Attr = A.getAttribute(SlotIndex, Attribute::Alignment);
+      if (uint64_t Alginment = Attr.getValueAsInt()) {
+        // Encode the alignment in LLVM 3.1 way, and decode it again.
+        uint64_t EncodedAlignment = (Log2_32(Alginment) + 1) << 16;
+        FauxAttr |= (1ull << 16) << ((EncodedAlignment - 1) >> 16);
+      }
+
+      FauxAttr |= (RawAttr & (0x3FFull << 21)) << 11;
 
       Record.push_back(FauxAttr);
     }
@@ -363,18 +365,19 @@ static unsigned getEncodedLinkage(const GlobalValue *GV) {
   case GlobalValue::AppendingLinkage:                return 2;
   case GlobalValue::InternalLinkage:                 return 3;
   case GlobalValue::LinkOnceAnyLinkage:              return 4;
-  case GlobalValue::DLLImportLinkage:                return 5;
-  case GlobalValue::DLLExportLinkage:                return 6;
+  // case GlobalValue::DLLImportLinkage:                return 5;
+  // case GlobalValue::DLLExportLinkage:                return 6;
   case GlobalValue::ExternalWeakLinkage:             return 7;
   case GlobalValue::CommonLinkage:                   return 8;
   case GlobalValue::PrivateLinkage:                  return 9;
   case GlobalValue::WeakODRLinkage:                  return 10;
   case GlobalValue::LinkOnceODRLinkage:              return 11;
   case GlobalValue::AvailableExternallyLinkage:      return 12;
-  case GlobalValue::LinkerPrivateLinkage:            return 13;
-  case GlobalValue::LinkerPrivateWeakLinkage:        return 14;
-  case GlobalValue::LinkerPrivateWeakDefAutoLinkage: return 15;
+  // case GlobalValue::LinkerPrivateLinkage:            return 13;
+  // case GlobalValue::LinkerPrivateWeakLinkage:        return 14;
+  // case GlobalValue::LinkerPrivateWeakDefAutoLinkage: return 15;
   }
+
   llvm_unreachable("Invalid linkage");
 }
 
@@ -392,16 +395,16 @@ static unsigned getEncodedVisibility(const GlobalValue *GV) {
 static void WriteModuleInfo(const Module *M, const ValueEnumerator &VE,
                             BitstreamWriter &Stream) {
   // Emit the list of dependent libraries for the Module.
-  for (Module::lib_iterator I = M->lib_begin(), E = M->lib_end(); I != E; ++I)
-    WriteStringRecord(bitc::MODULE_CODE_DEPLIB, *I, 0/*TODO*/, Stream);
+  // for (Module::lib_iterator I = M->lib_begin(), E = M->lib_end(); I != E; ++I)
+  //  WriteStringRecord(bitc::MODULE_CODE_DEPLIB, *I, 0/*TODO*/, Stream);
 
   // Emit various pieces of data attached to a module.
   if (!M->getTargetTriple().empty())
     WriteStringRecord(bitc::MODULE_CODE_TRIPLE, M->getTargetTriple(),
                       0/*TODO*/, Stream);
-  if (!M->getDataLayout().empty())
-    WriteStringRecord(bitc::MODULE_CODE_DATALAYOUT, M->getDataLayout(),
-                      0/*TODO*/, Stream);
+  const std::string &DL = M->getDataLayoutStr();
+  if (!DL.empty())
+    WriteStringRecord(bitc::MODULE_CODE_DATALAYOUT, DL, 0/*TODO*/, Stream);
   if (!M->getModuleInlineAsm().empty())
     WriteStringRecord(bitc::MODULE_CODE_ASM, M->getModuleInlineAsm(),
                       0/*TODO*/, Stream);
@@ -477,26 +480,25 @@ static void WriteModuleInfo(const Module *M, const ValueEnumerator &VE,
 
   // Emit the global variable information.
   SmallVector<unsigned, 64> Vals;
-  for (Module::const_global_iterator GV = M->global_begin(),E = M->global_end();
-       GV != E; ++GV) {
+  for (auto &GV : M->globals()) {
     unsigned AbbrevToUse = 0;
 
     // GLOBALVAR: [type, isconst, initid,
     //             linkage, alignment, section, visibility, threadlocal,
     //             unnamed_addr]
-    Vals.push_back(VE.getTypeID(GV->getType()));
-    Vals.push_back(GV->isConstant());
-    Vals.push_back(GV->isDeclaration() ? 0 :
-                   (VE.getValueID(GV->getInitializer()) + 1));
-    Vals.push_back(getEncodedLinkage(GV));
-    Vals.push_back(Log2_32(GV->getAlignment())+1);
-    Vals.push_back(GV->hasSection() ? SectionMap[GV->getSection()] : 0);
-    if (GV->isThreadLocal() ||
-        GV->getVisibility() != GlobalValue::DefaultVisibility ||
-        GV->hasUnnamedAddr()) {
-      Vals.push_back(getEncodedVisibility(GV));
-      Vals.push_back(GV->isThreadLocal());
-      Vals.push_back(GV->hasUnnamedAddr());
+    Vals.push_back(VE.getTypeID(GV.getType()));
+    Vals.push_back(GV.isConstant());
+    Vals.push_back(GV.isDeclaration() ? 0 :
+                   (VE.getValueID(GV.getInitializer()) + 1));
+    Vals.push_back(getEncodedLinkage(&GV));
+    Vals.push_back(Log2_32(GV.getAlignment())+1);
+    Vals.push_back(GV.hasSection() ? SectionMap[GV.getSection()] : 0);
+    if (GV.isThreadLocal() ||
+        GV.getVisibility() != GlobalValue::DefaultVisibility ||
+        GV.hasUnnamedAddr()) {
+      Vals.push_back(getEncodedVisibility(&GV));
+      Vals.push_back(GV.isThreadLocal());
+      Vals.push_back(GV.hasUnnamedAddr());
     } else {
       AbbrevToUse = SimpleGVarAbbrev;
     }
@@ -506,19 +508,19 @@ static void WriteModuleInfo(const Module *M, const ValueEnumerator &VE,
   }
 
   // Emit the function proto information.
-  for (Module::const_iterator F = M->begin(), E = M->end(); F != E; ++F) {
+  for (auto &F : *M) {
     // FUNCTION:  [type, callingconv, isproto, linkage, paramattrs, alignment,
     //             section, visibility, gc, unnamed_addr]
-    Vals.push_back(VE.getTypeID(F->getType()));
-    Vals.push_back(F->getCallingConv());
-    Vals.push_back(F->isDeclaration());
-    Vals.push_back(getEncodedLinkage(F));
-    Vals.push_back(VE.getAttributeID(F->getAttributes()));
-    Vals.push_back(Log2_32(F->getAlignment())+1);
-    Vals.push_back(F->hasSection() ? SectionMap[F->getSection()] : 0);
-    Vals.push_back(getEncodedVisibility(F));
-    Vals.push_back(F->hasGC() ? GCMap[F->getGC()] : 0);
-    Vals.push_back(F->hasUnnamedAddr());
+    Vals.push_back(VE.getTypeID(F.getType()));
+    Vals.push_back(F.getCallingConv());
+    Vals.push_back(F.isDeclaration());
+    Vals.push_back(getEncodedLinkage(&F));
+    Vals.push_back(VE.getAttributeID(F.getAttributes()));
+    Vals.push_back(Log2_32(F.getAlignment())+1);
+    Vals.push_back(F.hasSection() ? SectionMap[F.getSection()] : 0);
+    Vals.push_back(getEncodedVisibility(&F));
+    Vals.push_back(F.hasGC() ? GCMap[F.getGC()] : 0);
+    Vals.push_back(F.hasUnnamedAddr());
 
     unsigned AbbrevToUse = 0;
     Stream.EmitRecord(bitc::MODULE_CODE_FUNCTION, Vals, AbbrevToUse);
@@ -526,13 +528,12 @@ static void WriteModuleInfo(const Module *M, const ValueEnumerator &VE,
   }
 
   // Emit the alias information.
-  for (Module::const_alias_iterator AI = M->alias_begin(), E = M->alias_end();
-       AI != E; ++AI) {
+  for (auto &A : M->aliases()) {
     // ALIAS: [alias type, aliasee val#, linkage, visibility]
-    Vals.push_back(VE.getTypeID(AI->getType()));
-    Vals.push_back(VE.getValueID(AI->getAliasee()));
-    Vals.push_back(getEncodedLinkage(AI));
-    Vals.push_back(getEncodedVisibility(AI));
+    Vals.push_back(VE.getTypeID(A.getType()));
+    Vals.push_back(VE.getValueID(A.getAliasee()));
+    Vals.push_back(getEncodedLinkage(&A));
+    Vals.push_back(getEncodedVisibility(&A));
     unsigned AbbrevToUse = 0;
     Stream.EmitRecord(bitc::MODULE_CODE_ALIAS, Vals, AbbrevToUse);
     Vals.clear();
@@ -673,16 +674,15 @@ static void WriteMetadataAttachment(const Function &F,
   // METADATA_ATTACHMENT - [m x [value, [n x [id, mdnode]]]
   SmallVector<std::pair<unsigned, MDNode*>, 4> MDs;
   
-  for (Function::const_iterator BB = F.begin(), E = F.end(); BB != E; ++BB)
-    for (BasicBlock::const_iterator I = BB->begin(), E = BB->end();
-         I != E; ++I) {
+  for (auto &BB : F)
+    for (auto &I : BB) {
       MDs.clear();
-      I->getAllMetadataOtherThanDebugLoc(MDs);
+      I.getAllMetadataOtherThanDebugLoc(MDs);
       
       // If no metadata, ignore instruction.
       if (MDs.empty()) continue;
 
-      Record.push_back(VE.getInstructionID(I));
+      Record.push_back(VE.getInstructionID(&I));
       
       for (unsigned i = 0, e = MDs.size(); i != e; ++i) {
         Record.push_back(MDs[i].first);
@@ -1127,7 +1127,7 @@ static void WriteInstruction(const Instruction &I, unsigned InstID,
   case Instruction::Br:
     {
       Code = bitc::FUNC_CODE_INST_BR;
-      BranchInst &II = cast<BranchInst>(I);
+      const BranchInst &II = cast<BranchInst>(I);
       Vals.push_back(VE.getValueID(II.getSuccessor(0)));
       if (II.isConditional()) {
         Vals.push_back(VE.getValueID(II.getSuccessor(1)));
@@ -1138,12 +1138,11 @@ static void WriteInstruction(const Instruction &I, unsigned InstID,
   case Instruction::Switch:
     {
       Code = bitc::FUNC_CODE_INST_SWITCH;
-      SwitchInst &SI = cast<SwitchInst>(I);
+      const SwitchInst &SI = cast<SwitchInst>(I);
       Vals.push_back(VE.getTypeID(SI.getCondition()->getType()));
       Vals.push_back(VE.getValueID(SI.getCondition()));
       Vals.push_back(VE.getValueID(SI.getDefaultDest()));
-      for (SwitchInst::CaseIt i = SI.case_begin(), e = SI.case_end();
-           i != e; ++i) {
+      for (auto i = SI.case_begin(), e = SI.case_end(); i != e; ++i) {
         Vals.push_back(VE.getValueID(i.getCaseValue()));
         Vals.push_back(VE.getValueID(i.getCaseSuccessor()));
       }
@@ -1205,7 +1204,8 @@ static void WriteInstruction(const Instruction &I, unsigned InstID,
     const LandingPadInst &LP = cast<LandingPadInst>(I);
     Code = bitc::FUNC_CODE_INST_LANDINGPAD;
     Vals.push_back(VE.getTypeID(LP.getType()));
-    PushValueAndType(LP.getPersonalityFn(), InstID, Vals, VE);
+    llvm_unreachable("No getPersonalityFn!");
+    // PushValueAndType(LP.getPersonalityFn(), InstID, Vals, VE);
     Vals.push_back(LP.isCleanup());
     Vals.push_back(LP.getNumClauses());
     for (unsigned I = 0, E = LP.getNumClauses(); I != E; ++I) {
@@ -1263,7 +1263,7 @@ static void WriteInstruction(const Instruction &I, unsigned InstID,
     Vals.push_back(VE.getValueID(I.getOperand(2)));       // newval.
     Vals.push_back(cast<AtomicCmpXchgInst>(I).isVolatile());
     Vals.push_back(GetEncodedOrdering(
-                     cast<AtomicCmpXchgInst>(I).getOrdering()));
+                     cast<AtomicCmpXchgInst>(I).getSuccessOrdering()));
     Vals.push_back(GetEncodedSynchScope(
                      cast<AtomicCmpXchgInst>(I).getSynchScope()));
     break;
@@ -1627,9 +1627,7 @@ static void WriteUseList(const Value *V, const ValueEnumerator &VE,
   unsigned UseListSize = std::distance(V->use_begin(), V->use_end());
   SmallVector<const User*, 8> UseList;
   UseList.reserve(UseListSize);
-  for (Value::const_use_iterator I = V->use_begin(), E = V->use_end();
-       I != E; ++I) {
-    const User *U = *I;
+  for (const auto *U : V->users()) {
     UseList.push_back(U);
   }
 
@@ -1646,20 +1644,16 @@ static void WriteFunctionUseList(const Function *F, ValueEnumerator &VE,
                                  BitstreamWriter &Stream) {
   VE.incorporateFunction(*F);
 
-  for (Function::const_arg_iterator AI = F->arg_begin(), AE = F->arg_end();
-       AI != AE; ++AI)
-    WriteUseList(AI, VE, Stream);
-  for (Function::const_iterator BB = F->begin(), FE = F->end(); BB != FE;
-       ++BB) {
-    WriteUseList(BB, VE, Stream);
-    for (BasicBlock::const_iterator II = BB->begin(), IE = BB->end(); II != IE;
-         ++II) {
-      WriteUseList(II, VE, Stream);
-      for (User::const_op_iterator OI = II->op_begin(), E = II->op_end();
-           OI != E; ++OI) {
-        if ((isa<Constant>(*OI) && !isa<GlobalValue>(*OI)) ||
-            isa<InlineAsm>(*OI))
-          WriteUseList(*OI, VE, Stream);
+  for (auto &A : F->args())
+    WriteUseList(&A, VE, Stream);
+  for (auto &BB : *F) {
+    WriteUseList(&BB, VE, Stream);
+    for (auto &I : BB) {
+      WriteUseList(&I, VE, Stream);
+      for (auto &O : I.operands()) {
+        if ((isa<Constant>(O) && !isa<GlobalValue>(O)) ||
+            isa<InlineAsm>(O))
+          WriteUseList(O, VE, Stream);
       }
     }
   }
@@ -1675,32 +1669,29 @@ static void WriteModuleUseLists(const Module *M, ValueEnumerator &VE,
   // behavior of any pass or codegen in LLVM. The problem is that GVs may
   // contain entries in the use_list that do not exist in the Module and are
   // not stored in the .bc file.
-  for (Module::const_global_iterator I = M->global_begin(), E = M->global_end();
-       I != E; ++I)
-    I->removeDeadConstantUsers();
+  for (auto &G : M->globals())
+    G.removeDeadConstantUsers();
   
   // Write the global variables.
-  for (Module::const_global_iterator GI = M->global_begin(), 
-         GE = M->global_end(); GI != GE; ++GI) {
-    WriteUseList(GI, VE, Stream);
+  for (auto &G : M->globals()) {
+    WriteUseList(&G, VE, Stream);
 
     // Write the global variable initializers.
-    if (GI->hasInitializer())
-      WriteUseList(GI->getInitializer(), VE, Stream);
+    if (G.hasInitializer())
+      WriteUseList(G.getInitializer(), VE, Stream);
   }
 
   // Write the functions.
-  for (Module::const_iterator FI = M->begin(), FE = M->end(); FI != FE; ++FI) {
-    WriteUseList(FI, VE, Stream);
-    if (!FI->isDeclaration())
-      WriteFunctionUseList(FI, VE, Stream);
+  for (auto &F : *M) {
+    WriteUseList(&F, VE, Stream);
+    if (!F.isDeclaration())
+      WriteFunctionUseList(&F, VE, Stream);
   }
 
   // Write the aliases.
-  for (Module::const_alias_iterator AI = M->alias_begin(), AE = M->alias_end();
-       AI != AE; ++AI) {
-    WriteUseList(AI, VE, Stream);
-    WriteUseList(AI->getAliasee(), VE, Stream);
+  for (auto &A :M->aliases()) {
+    WriteUseList(&A, VE, Stream);
+    WriteUseList(A.getAliasee(), VE, Stream);
   }
 
   Stream.ExitBlock();
@@ -1832,7 +1823,7 @@ static void EmitDarwinBCHeaderAndTrailer(SmallVectorImpl<char> &Buffer,
 
 /// WriteBitcodeToFile - Write the specified module to the specified output
 /// stream.
-void llvm::WriteBitcodeToFile(const Module *M, raw_ostream &Out) {
+void llvm::ver_3_1::WriteBitcodeToFile(const Module *M, raw_ostream &Out) {
   SmallVector<char, 1024> Buffer;
   Buffer.reserve(256*1024);
 

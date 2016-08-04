@@ -14,15 +14,16 @@
 #include "ValueEnumerator.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/STLExtras.h"
-#include "llvm/Constants.h"
-#include "llvm/DerivedTypes.h"
-#include "llvm/Module.h"
-#include "llvm/ValueSymbolTable.h"
-#include "llvm/Instructions.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/Module.h"
+#include "llvm/IR/ValueSymbolTable.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
 using namespace llvm;
+using namespace ver_3_1;
 
 static bool isIntegerValue(const std::pair<const Value*, unsigned> &V) {
   return V.first->getType()->isIntegerTy();
@@ -31,20 +32,18 @@ static bool isIntegerValue(const std::pair<const Value*, unsigned> &V) {
 /// ValueEnumerator - Enumerate module-level information.
 ValueEnumerator::ValueEnumerator(const Module *M) {
   // Enumerate the global variables.
-  for (Module::const_global_iterator I = M->global_begin(),
-         E = M->global_end(); I != E; ++I)
-    EnumerateValue(I);
+  for (auto &G : M->globals())
+    EnumerateValue(&G);
 
   // Enumerate the functions.
-  for (Module::const_iterator I = M->begin(), E = M->end(); I != E; ++I) {
-    EnumerateValue(I);
-    EnumerateAttributes(cast<Function>(I)->getAttributes());
+  for (auto &F : *M) {
+    EnumerateValue(&F);
+    EnumerateAttributes(cast<Function>(F).getAttributes());
   }
 
   // Enumerate the aliases.
-  for (Module::const_alias_iterator I = M->alias_begin(), E = M->alias_end();
-       I != E; ++I)
-    EnumerateValue(I);
+  for (auto &A : M->aliases())
+    EnumerateValue(&A);
 
   // Remember what is the cutoff between globalvalue's and other constants.
   unsigned FirstConstant = Values.size();
@@ -417,7 +416,7 @@ void ValueEnumerator::EnumerateOperandType(const Value *V) {
     EnumerateMetadata(V);
 }
 
-void ValueEnumerator::EnumerateAttributes(const AttrListPtr &PAL) {
+void ValueEnumerator::EnumerateAttributes(const AttributeSet &PAL) {
   if (PAL.isEmpty()) return;  // null is always 0.
   // Do a lookup.
   unsigned &Entry = AttributeMap[PAL.getRawPointer()];
@@ -434,23 +433,21 @@ void ValueEnumerator::incorporateFunction(const Function &F) {
   NumModuleMDValues = MDValues.size();
 
   // Adding function arguments to the value table.
-  for (Function::const_arg_iterator I = F.arg_begin(), E = F.arg_end();
-       I != E; ++I)
-    EnumerateValue(I);
+  for (auto &A : F.args())
+    EnumerateValue(&A);
 
   FirstFuncConstantID = Values.size();
 
   // Add all function-level constants to the value table.
-  for (Function::const_iterator BB = F.begin(), E = F.end(); BB != E; ++BB) {
-    for (BasicBlock::const_iterator I = BB->begin(), E = BB->end(); I!=E; ++I)
-      for (User::const_op_iterator OI = I->op_begin(), E = I->op_end();
-           OI != E; ++OI) {
-        if ((isa<Constant>(*OI) && !isa<GlobalValue>(*OI)) ||
-            isa<InlineAsm>(*OI))
-          EnumerateValue(*OI);
+  for (auto &BB : F) {
+    for (auto &I : BB)
+      for (auto &O : I.operands()) {
+        if ((isa<Constant>(O) && !isa<GlobalValue>(O)) ||
+            isa<InlineAsm>(O))
+          EnumerateValue(O);
       }
-    BasicBlocks.push_back(BB);
-    ValueMap[BB] = BasicBlocks.size();
+    BasicBlocks.push_back(&BB);
+    ValueMap[&BB] = BasicBlocks.size();
   }
 
   // Optimize the constant layout.
@@ -510,8 +507,8 @@ void ValueEnumerator::purgeFunction() {
 static void IncorporateFunctionInfoGlobalBBIDs(const Function *F,
                                  DenseMap<const BasicBlock*, unsigned> &IDMap) {
   unsigned Counter = 0;
-  for (Function::const_iterator BB = F->begin(), E = F->end(); BB != E; ++BB)
-    IDMap[BB] = ++Counter;
+  for (auto &BB : *F)
+    IDMap[&BB] = ++Counter;
 }
 
 /// getGlobalBasicBlockID - This returns the function-specific ID for the
