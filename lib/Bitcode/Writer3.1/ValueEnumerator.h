@@ -80,7 +80,7 @@ private:
 
   /// When a function is incorporated, this is the size of the MDValues list
   /// before incorporation.
-  unsigned NumModuleMDValues;
+  unsigned NumModuleMDs;
 
   unsigned FirstFuncConstantID;
   unsigned FirstInstID;
@@ -92,6 +92,7 @@ public:
 
   void dump() const;
   void print(raw_ostream &OS, const ValueMapType &Map, const char *Name) const;
+  void print(raw_ostream &OS, const MetadataMapType &Map, const char *Name) const;
 
   unsigned getValueID(const Value *V) const;
   unsigned getMetadataID(const Metadata *MD) const {
@@ -157,8 +158,8 @@ private:
   void OptimizeConstants(unsigned CstStart, unsigned CstEnd);
     
   void EnumerateMDNodeOperands(const MDNode *N);
-  void EnumerateMetadata(const Value *MD);
-  void EnumerateFunctionLocalMetadata(const MDNode *N);
+  void EnumerateMetadata(const Metadata *MD);
+  void EnumerateFunctionLocalMetadata(const LocalAsMetadata *Local);
   void EnumerateNamedMDNode(const NamedMDNode *NMD);
   void EnumerateValue(const Value *V);
   void EnumerateType(Type *T);
