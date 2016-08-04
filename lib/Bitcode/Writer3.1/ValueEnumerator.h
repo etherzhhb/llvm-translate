@@ -25,9 +25,11 @@ class Instruction;
 class BasicBlock;
 class Function;
 class Module;
+class Metadata;
 class MDNode;
 class NamedMDNode;
-class AttrListPtr;
+class LocalAsMetadata;
+class AttributeSet;
 class ValueSymbolTable;
 class MDSymbolTable;
 class raw_ostream;
@@ -48,10 +50,14 @@ private:
   typedef DenseMap<const Value*, unsigned> ValueMapType;
   ValueMapType ValueMap;
   ValueList Values;
-  ValueList MDValues;
-  SmallVector<const MDNode *, 8> FunctionLocalMDs;
-  ValueMapType MDValueMap;
-  
+
+  std::vector<const llvm::Metadata *> MDs;
+  SmallVector<const LocalAsMetadata *, 8> FunctionLocalMDs;
+  typedef llvm::DenseMap<const llvm::Metadata *, unsigned> MetadataMapType;
+  MetadataMapType MDValueMap;
+  bool HasMDString;
+  bool HasDILocation;
+
   typedef DenseMap<void*, unsigned> AttributeMapType;
   AttributeMapType AttributeMap;
   std::vector<AttributeSet> Attributes;
@@ -79,8 +85,8 @@ private:
   unsigned FirstFuncConstantID;
   unsigned FirstInstID;
   
-  ValueEnumerator(const ValueEnumerator &);  // DO NOT IMPLEMENT
-  void operator=(const ValueEnumerator &);   // DO NOT IMPLEMENT
+  ValueEnumerator(const ValueEnumerator &) = delete;
+  void operator=(const ValueEnumerator &) = delete;
 public:
   ValueEnumerator(const Module *M);
 
@@ -88,6 +94,17 @@ public:
   void print(raw_ostream &OS, const ValueMapType &Map, const char *Name) const;
 
   unsigned getValueID(const Value *V) const;
+  unsigned getMetadataID(const Metadata *MD) const {
+    auto ID = getMetadataOrNullID(MD);
+    assert(ID != 0 && "Metadata not in slotcalculator!");
+    return ID - 1;
+  }
+  unsigned getMetadataOrNullID(const Metadata *MD) const {
+    return MDValueMap.lookup(MD);
+  }
+
+  bool hasMDString() const { return HasMDString; }
+  bool hasDILocation() const { return HasDILocation; }
 
   unsigned getTypeID(Type *T) const {
     TypeMapType::const_iterator I = TypeMap.find(T);
@@ -113,8 +130,8 @@ public:
   }
   
   const ValueList &getValues() const { return Values; }
-  const ValueList &getMDValues() const { return MDValues; }
-  const SmallVector<const MDNode *, 8> &getFunctionLocalMDValues() const { 
+  const std::vector<const llvm::Metadata *> &getMDs() const { return MDs; }
+  const SmallVectorImpl<const LocalAsMetadata  *> &getFunctionLocalMDValues() const {
     return FunctionLocalMDs;
   }
   const TypeList &getTypes() const { return Types; }
