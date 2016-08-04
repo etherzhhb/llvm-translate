@@ -602,8 +602,10 @@ static void WriteModuleMetadata(const Module *M,
   const auto &MDs = VE.getMDs();
   if (MDs.empty() && M->named_metadata_empty())
     return;
+
   // RenderScript files *ALWAYS* have metadata!
   Stream.EnterSubblock(bitc::METADATA_BLOCK_ID, 3);
+
   unsigned MDSAbbrev = 0;
   if (VE.hasMDString()) {
     // Abbrev for METADATA_STRING.
@@ -613,8 +615,10 @@ static void WriteModuleMetadata(const Module *M,
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 8));
     MDSAbbrev = Stream.EmitAbbrev(Abbv);
   }
-  unsigned MDLocationAbbrev = 0;
+
+  // unsigned MDLocationAbbrev = 0;
   if (VE.hasDILocation()) {
+#if 0
     // TODO(srhines): Should be unreachable for RenderScript.
     // Abbrev for METADATA_LOCATION.
     //
@@ -628,7 +632,9 @@ static void WriteModuleMetadata(const Module *M,
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 6));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 6));
     MDLocationAbbrev = Stream.EmitAbbrev(Abbv);
+#endif
   }
+
   unsigned NameAbbrev = 0;
   if (!M->named_metadata_empty()) {
     // Abbrev for METADATA_NAME.
@@ -638,6 +644,7 @@ static void WriteModuleMetadata(const Module *M,
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 8));
     NameAbbrev = Stream.EmitAbbrev(Abbv);
   }
+
   unsigned MDTupleAbbrev = 0;
   //unsigned GenericDebugNodeAbbrev = 0;
   SmallVector<uint64_t, 64> Record;
@@ -661,10 +668,12 @@ static void WriteModuleMetadata(const Module *M,
     const MDString *MDS = cast<MDString>(MD);
     // Code: [strchar x N]
     Record.append(MDS->bytes_begin(), MDS->bytes_end());
+
     // Emit the finished record.
     Stream.EmitRecord(bitc::METADATA_STRING, Record, MDSAbbrev);
     Record.clear();
   }
+
   // Write named metadata.
   for (const NamedMDNode &NMD : M->named_metadata()) {
     // Write name.
@@ -672,12 +681,14 @@ static void WriteModuleMetadata(const Module *M,
     Record.append(Str.bytes_begin(), Str.bytes_end());
     Stream.EmitRecord(bitc::METADATA_NAME, Record, NameAbbrev);
     Record.clear();
+
     // Write named metadata operands.
     for (const MDNode *N : NMD.operands())
       Record.push_back(VE.getMetadataID(N));
     Stream.EmitRecord(bitc::METADATA_NAMED_NODE, Record, 0);
     Record.clear();
   }
+
   Stream.ExitBlock();
 }
 
@@ -1464,8 +1475,6 @@ static void WriteFunction(const Function &F, ValueEnumerator &VE,
         Stream.EmitRecord(bitc::FUNC_CODE_DEBUG_LOC_AGAIN, Vals);
         continue;
       }
-
-      MDNode *Scope, *IA;
         
       Vals.push_back(DL->getLine());
       Vals.push_back(DL->getColumn());
