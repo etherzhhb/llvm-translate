@@ -16,11 +16,9 @@
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
-#include "llvm/Attributes.h"
+#include "llvm/IR/Attributes.h"
 #include <vector>
-
 namespace llvm {
-
 class Type;
 class Value;
 class Instruction;
@@ -33,6 +31,8 @@ class AttrListPtr;
 class ValueSymbolTable;
 class MDSymbolTable;
 class raw_ostream;
+
+namespace ver_3_1 {
 
 class ValueEnumerator {
 public:
@@ -54,7 +54,7 @@ private:
   
   typedef DenseMap<void*, unsigned> AttributeMapType;
   AttributeMapType AttributeMap;
-  std::vector<AttrListPtr> Attributes;
+  std::vector<AttributeSet> Attributes;
   
   /// GlobalBasicBlockIDs - This map memoizes the basic block ID's referenced by
   /// the "getGlobalBasicBlockID" method.
@@ -98,7 +98,7 @@ public:
   unsigned getInstructionID(const Instruction *I) const;
   void setInstructionID(const Instruction *I);
 
-  unsigned getAttributeID(const AttrListPtr &PAL) const {
+  unsigned getAttributeID(const AttributeSet &PAL) const {
     if (PAL.isEmpty()) return 0;  // Null maps to zero.
     AttributeMapType::const_iterator I = AttributeMap.find(PAL.getRawPointer());
     assert(I != AttributeMap.end() && "Attribute not in ValueEnumerator!");
@@ -121,7 +121,7 @@ public:
   const std::vector<const BasicBlock*> &getBasicBlocks() const {
     return BasicBlocks; 
   }
-  const std::vector<AttrListPtr> &getAttributes() const {
+  const std::vector<AttributeSet> &getAttributes() const {
     return Attributes;
   }
   
@@ -146,12 +146,12 @@ private:
   void EnumerateValue(const Value *V);
   void EnumerateType(Type *T);
   void EnumerateOperandType(const Value *V);
-  void EnumerateAttributes(const AttrListPtr &PAL);
+  void EnumerateAttributes(const AttributeSet &PAL);
   
   void EnumerateValueSymbolTable(const ValueSymbolTable &ST);
   void EnumerateNamedMetadata(const Module *M);
 };
-
+}
 } // End llvm namespace
 
 #endif

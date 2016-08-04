@@ -155,9 +155,11 @@ public:
   }
 
 };
+} // End ver_3_1 namespace
 
-template <> struct isPodLike<BitCodeAbbrevOp> { static const bool value=true; };
+template <> struct isPodLike<ver_3_1::BitCodeAbbrevOp> { static const bool value=true; };
 
+namespace ver_3_1 {
 /// BitCodeAbbrev - This class represents an abbreviation record.  An
 /// abbreviation allows a complex record that has redundancy to be stored in a
 /// specialized format instead of the fully-general, fully-vbr, format.
