@@ -285,7 +285,7 @@ void ValueEnumerator::EnumerateMDTuple(const MDTuple *MD) {
 void ValueEnumerator::EnumerateDILocation(const DILocation *MD) {}
 
 void ValueEnumerator::EnumerateDIExpression(const DIExpression *MD) {
-  // Skip
+  // Do not enumerate any operand.
 }
 
 void ValueEnumerator::EnumerateGenericDINode(const GenericDINode *MD) {}
