@@ -15,8 +15,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_BITCODE_LLVMBITCODES_H
-#define LLVM_BITCODE_LLVMBITCODES_H
+#ifndef LLVM_BACKPORT_LLVMBITCODES_H
+#define LLVM_BACKPORT_LLVMBITCODES_H
 
 #include "BitCodes.h"
 
