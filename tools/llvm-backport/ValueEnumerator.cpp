@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "ValueEnumerator.h"
+#include "LLVMBitCodes.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/IR/Constants.h"
@@ -26,12 +27,12 @@
 using namespace llvm;
 using namespace ver_3_1;
 
-static bool isIntegerValue(const std::pair<const Value*, unsigned> &V) {
+static bool isIntegerValue(const std::pair<const Value *, unsigned> &V) {
   return V.first->getType()->isIntegerTy();
 }
 
 /// ValueEnumerator - Enumerate module-level information.
-ValueEnumerator::ValueEnumerator(const Module *M) {
+ValueEnumerator::ValueEnumerator(const Module *M) : M(*M), C(M->getContext()) {
   // Enumerate the global variables.
   for (auto &G : M->globals())
     EnumerateValue(&G);
@@ -40,6 +41,7 @@ ValueEnumerator::ValueEnumerator(const Module *M) {
   for (auto &F : *M) {
     EnumerateValue(&F);
     EnumerateAttributes(cast<Function>(F).getAttributes());
+    MapDebugInfo(&F);
   }
 
   // Enumerate the aliases.
@@ -50,8 +52,8 @@ ValueEnumerator::ValueEnumerator(const Module *M) {
   unsigned FirstConstant = Values.size();
 
   // Enumerate the global variable initializers.
-  for (Module::const_global_iterator I = M->global_begin(),
-         E = M->global_end(); I != E; ++I)
+  for (Module::const_global_iterator I = M->global_begin(), E = M->global_end();
+       I != E; ++I)
     if (I->hasInitializer())
       EnumerateValue(I->getInitializer());
 
@@ -60,12 +62,12 @@ ValueEnumerator::ValueEnumerator(const Module *M) {
        I != E; ++I)
     EnumerateValue(I->getAliasee());
 
-  // Insert constants and metadata that are named at module level into the slot 
+  // Insert constants and metadata that are named at module level into the slot
   // pool so that the module symbol table can refer to them...
   EnumerateValueSymbolTable(M->getValueSymbolTable());
   EnumerateNamedMetadata(M);
 
-  SmallVector<std::pair<unsigned, MDNode*>, 8> MDs;
+  SmallVector<std::pair<unsigned, MDNode *>, 8> MDs;
 
   // Enumerate types used by function bodies and argument lists.
   for (const auto &F : *M) {
@@ -143,8 +145,8 @@ void ValueEnumerator::print(raw_ostream &OS, const ValueMapType &Map,
 
   OS << "Map Name: " << Name << "\n";
   OS << "Size: " << Map.size() << "\n";
-  for (ValueMapType::const_iterator I = Map.begin(),
-         E = Map.end(); I != E; ++I) {
+  for (ValueMapType::const_iterator I = Map.begin(), E = Map.end(); I != E;
+       ++I) {
 
     const Value *V = I->first;
     if (V->hasName())
@@ -153,18 +155,17 @@ void ValueEnumerator::print(raw_ostream &OS, const ValueMapType &Map,
       OS << "Value: [null]\n";
     V->dump();
 
-    OS << " Uses(" << std::distance(V->use_begin(),V->use_end()) << "):";
+    OS << " Uses(" << std::distance(V->use_begin(), V->use_end()) << "):";
     for (Value::const_use_iterator UI = V->use_begin(), UE = V->use_end();
          UI != UE; ++UI) {
       if (UI != V->use_begin())
         OS << ",";
-      if((*UI)->hasName())
+      if ((*UI)->hasName())
         OS << " " << (*UI)->getName();
       else
         OS << " [null]";
-
     }
-    OS <<  "\n\n";
+    OS << "\n\n";
   }
 }
 
@@ -181,38 +182,275 @@ void ValueEnumerator::print(raw_ostream &OS, const MetadataMapType &Map,
 
 // Optimize constant ordering.
 namespace {
-  struct CstSortPredicate {
-    ValueEnumerator &VE;
-    explicit CstSortPredicate(ValueEnumerator &ve) : VE(ve) {}
-    bool operator()(const std::pair<const Value*, unsigned> &LHS,
-                    const std::pair<const Value*, unsigned> &RHS) {
-      // Sort by plane.
-      if (LHS.first->getType() != RHS.first->getType())
-        return VE.getTypeID(LHS.first->getType()) <
-               VE.getTypeID(RHS.first->getType());
-      // Then by frequency.
-      return LHS.second > RHS.second;
-    }
-  };
+struct CstSortPredicate {
+  ValueEnumerator &VE;
+  explicit CstSortPredicate(ValueEnumerator &ve) : VE(ve) {}
+  bool operator()(const std::pair<const Value *, unsigned> &LHS,
+                  const std::pair<const Value *, unsigned> &RHS) {
+    // Sort by plane.
+    if (LHS.first->getType() != RHS.first->getType())
+      return VE.getTypeID(LHS.first->getType()) <
+             VE.getTypeID(RHS.first->getType());
+    // Then by frequency.
+    return LHS.second > RHS.second;
+  }
+};
 }
 
 /// OptimizeConstants - Reorder constant pool for denser encoding.
 void ValueEnumerator::OptimizeConstants(unsigned CstStart, unsigned CstEnd) {
-  if (CstStart == CstEnd || CstStart+1 == CstEnd) return;
+  if (CstStart == CstEnd || CstStart + 1 == CstEnd)
+    return;
 
   CstSortPredicate P(*this);
-  std::stable_sort(Values.begin()+CstStart, Values.begin()+CstEnd, P);
+  std::stable_sort(Values.begin() + CstStart, Values.begin() + CstEnd, P);
 
   // Ensure that integer constants are at the start of the constant pool.  This
   // is important so that GEP structure indices come before gep constant exprs.
-  std::partition(Values.begin()+CstStart, Values.begin()+CstEnd,
+  std::partition(Values.begin() + CstStart, Values.begin() + CstEnd,
                  isIntegerValue);
 
   // Rebuild the modified portion of ValueMap.
   for (; CstStart != CstEnd; ++CstStart)
-    ValueMap[Values[CstStart].first] = CstStart+1;
+    ValueMap[Values[CstStart].first] = CstStart + 1;
 }
 
+void ValueEnumerator::MapDebugInfo(const Function *F) {
+  auto *DI = F->getSubprogram();
+
+  if (DI == nullptr)
+    return;
+
+  bool Inserted = DIMap.insert(std::make_pair(DI, F)).second;
+  assert(Inserted && "Subprogram exists?");
+  (void)Inserted;
+}
+
+void ValueEnumerator::EnumerateInt(uint64_t Val, unsigned NumBits) {
+  auto *T = IntegerType::get(C, NumBits);
+  auto *V = ConstantInt::get(T, Val);
+  EnumerateValue(V);
+}
+
+void ValueEnumerator::EnumerateInt32(uint32_t Val) { EnumerateInt(Val, 32); }
+
+void ValueEnumerator::EnumerateInt64(uint64_t Val) { EnumerateInt(Val, 64); }
+
+void ValueEnumerator::EnumerateBool(bool b) { EnumerateInt(b ? 1 : 0, 1); }
+
+void ValueEnumerator::EnumerateDwarfTag(unsigned Tag) {
+  EnumerateInt32(LLVMDebugVersion + Tag);
+}
+
+void ValueEnumerator::EnumerateMDString(StringRef S) {
+  EnumerateMetadata(MDString::get(C, S));
+}
+
+void ValueEnumerator::EnumerateDICompositeTypeBase(const DIType *MD,
+                                                   const Metadata *ParentType,
+                                                   const Metadata *MemberTypes,
+                                                   uint32_t RuntimeLanguage) {
+  //! 6 = metadata !{
+  //  i32,      ;; Tag (see below)
+  EnumerateDwarfTag(MD->getTag());
+  //  metadata, ;; Reference to context
+  EnumerateMetadata(MD->getRawScope());
+  //  metadata, ;; Name (may be "" for anonymous types)
+  EnumerateMetadata(MD->getRawName());
+  //  metadata, ;; Reference to file where defined (may be NULL)
+  EnumerateMetadata(MD->getRawFile());
+  //  i32,      ;; Line number where defined (may be 0)
+  EnumerateInt32(MD->getLine());
+  //  i64,      ;; Size in bits
+  EnumerateInt64(MD->getSizeInBits());
+  //  i64,      ;; Alignment in bits
+  EnumerateInt64(MD->getAlignInBits());
+  //  i64,      ;; Offset in bits
+  EnumerateInt64(MD->getOffsetInBits());
+  //  i32,      ;; Flags
+  EnumerateInt32(MD->getFlags());
+  //  metadata, ;; Reference to type derived from
+  EnumerateMetadata(ParentType);
+  //  metadata, ;; Reference to array of member descriptors
+  EnumerateMetadata(MemberTypes);
+  //  i32       ;; Runtime languages
+  EnumerateInt32(RuntimeLanguage);
+  //}
+}
+
+void ValueEnumerator::EnumerateMDTuple(const MDTuple *MD) {
+  EnumerateMDNodeOperands(MD);
+}
+
+void ValueEnumerator::EnumerateDILocation(const DILocation *MD) {}
+
+void ValueEnumerator::EnumerateDIExpression(const DIExpression *MD) {
+  // Skip
+}
+
+void ValueEnumerator::EnumerateGenericDINode(const GenericDINode *MD) {}
+
+void ValueEnumerator::EnumerateDISubrange(const DISubrange *MD) {}
+void ValueEnumerator::EnumerateDIEnumerator(const DIEnumerator *MD) {}
+
+void ValueEnumerator::EnumerateDIBasicType(const DIBasicType *MD) {
+  //! 4 = metadata !{
+  //  i32,      ;; Tag = 36 + LLVMDebugVersion
+  EnumerateDwarfTag(MD->getTag());
+  //            ;; (DW_TAG_base_type)
+  //  metadata, ;; Reference to context
+  EnumerateMetadata(MD->getRawScope());
+  //  metadata, ;; Name (may be "" for anonymous types)
+  EnumerateMetadata(MD->getRawName());
+  //  metadata, ;; Reference to file where defined (may be NULL)
+  EnumerateMetadata(MD->getRawFile());
+  //  i32,      ;; Line number where defined (may be 0)
+  EnumerateInt32(MD->getLine());
+  //  i64,      ;; Size in bits
+  EnumerateInt64(MD->getSizeInBits());
+  //  i64,      ;; Alignment in bits
+  EnumerateInt64(MD->getAlignInBits());
+  //  i64,      ;; Offset in bits
+  EnumerateInt64(MD->getOffsetInBits());
+  //  i32,      ;; Flags
+  EnumerateInt32(MD->getFlags());
+  //  i32       ;; DWARF type encoding
+  EnumerateInt32(MD->getEncoding());
+  //}
+}
+
+void ValueEnumerator::EnumerateDIDerivedType(const DIDerivedType *MD) {}
+
+void ValueEnumerator::EnumerateDICompositeType(const DICompositeType *MD) {}
+
+void ValueEnumerator::EnumerateDISubroutineType(const DISubroutineType *MD) {
+  EnumerateDICompositeTypeBase(MD, nullptr, MD->getRawTypeArray(), 0);
+}
+
+void ValueEnumerator::EnumerateDIFile(const DIFile *MD) { MD->dump(); }
+
+void ValueEnumerator::EnumerateDICompileUnit(const DICompileUnit *MD) {
+  //! 0 = metadata !{
+  //  i32,       ;; Tag = 17 + LLVMDebugVersion
+  //             ;; (DW_TAG_compile_unit)
+  EnumerateDwarfTag(MD->getTag());
+  //  i32,       ;; Unused field.
+  EnumerateInt32(0);
+  //  i32,       ;; DWARF language identifier (ex. DW_LANG_C89)
+  EnumerateInt32(MD->getSourceLanguage());
+  //  metadata,  ;; Source file name
+  EnumerateMDString(MD->getFilename());
+  //  metadata,  ;; Source file directory (includes trailing slash)
+  EnumerateMDString(MD->getDirectory());
+  //  metadata   ;; Producer (ex. "4.0.1 LLVM (LLVM research group)")
+  EnumerateMDString(MD->getProducer());
+  //  i1,        ;; True if this is a main compile unit.
+  EnumerateBool(true);
+  //  i1,        ;; True if this is optimized.
+  EnumerateBool(MD->isOptimized());
+  //  metadata,  ;; Flags
+  EnumerateMetadata(MD->getRawFlags());
+  //  i32        ;; Runtime version
+  EnumerateInt32(MD->getRuntimeVersion());
+  //  metadata   ;; List of enums types
+  EnumerateMetadata(MD->getRawEnumTypes());
+  //  metadata   ;; List of retained types
+  EnumerateMetadata(MD->getRawRetainedTypes());
+  //  metadata   ;; List of subprograms
+  EnumerateMetadata(nullptr);
+  //  metadata   ;; List of global variables
+  EnumerateMetadata(MD->getRawGlobalVariables());
+  //}
+}
+
+void ValueEnumerator::EnumerateDISubprogram(const DISubprogram *MD) {
+  //! 2 = metadata !{
+  //  i32,      ;; Tag = 46 + LLVMDebugVersion
+  EnumerateDwarfTag(MD->getTag());
+  //            ;; (DW_TAG_subprogram)
+  //  i32,      ;; Unused field.
+  EnumerateInt32(0);
+  //  metadata, ;; Reference to context descriptor
+  EnumerateMetadata(MD->getRawScope());
+  //  metadata, ;; Name
+  EnumerateMetadata(MD->getRawName());
+  //  metadata, ;; Display name (fully qualified C++ name)
+  EnumerateMDString(MD->getDisplayName());
+  //  metadata, ;; MIPS linkage name (for C++)
+  EnumerateMetadata(MD->getRawLinkageName());
+  //  metadata, ;; Reference to file where defined
+  EnumerateMetadata(MD->getRawFile());
+  //  i32,      ;; Line number where defined
+  EnumerateInt32(MD->getLine());
+  //  metadata, ;; Reference to type descriptor
+  EnumerateMetadata(MD->getRawType());
+  //  i1,       ;; True if the global is local to compile unit (static)
+  EnumerateBool(MD->isLocalToUnit());
+  //  i1,       ;; True if the global is defined in the compile unit (not
+  //  extern)
+  EnumerateBool(MD->isDefinition());
+  //  i32,      ;; Line number where the scope of the subprogram begins
+  EnumerateInt32(MD->getScopeLine());
+  //  i32,      ;; Virtuality, e.g. dwarf::DW_VIRTUALITY__virtual
+  EnumerateInt32(MD->getVirtuality());
+  //  i32,      ;; Index into a virtual function
+  EnumerateInt32(MD->getVirtualIndex());
+  //  metadata, ;; indicates which base type contains the vtable pointer for the
+  //            ;; derived class
+  EnumerateMetadata(MD->getRawContainingType());
+  //  i32,      ;; Flags - Artifical, Private, Protected, Explicit, Prototyped.
+  EnumerateInt32(MD->getFlags());
+  //  i1,       ;; isOptimized
+  EnumerateBool(MD->isOptimized());
+  //  Function *,;; Pointer to LLVM function
+  EnumerateValue(getFunction(MD));
+  //  metadata, ;; Lists function template parameters
+  EnumerateMetadata(MD->getRawTemplateParams());
+  //  metadata  ;; Function declaration descriptor
+  EnumerateMetadata(MD->getRawDeclaration());
+  //  metadata  ;; List of function variables
+  EnumerateMetadata(MD->getRawVariables());
+  //}
+}
+
+void ValueEnumerator::EnumerateDILexicalBlock(const DILexicalBlock *MD) {}
+void ValueEnumerator::EnumerateDILexicalBlockFile(
+    const DILexicalBlockFile *MD) {}
+void ValueEnumerator::EnumerateDINamespace(const DINamespace *MD) {}
+void ValueEnumerator::EnumerateDIModule(const DIModule *MD) {}
+void ValueEnumerator::EnumerateDITemplateTypeParameter(
+    const DITemplateTypeParameter *MD) {}
+void ValueEnumerator::EnumerateDITemplateValueParameter(
+    const DITemplateValueParameter *MD) {}
+void ValueEnumerator::EnumerateDIGlobalVariable(const DIGlobalVariable *MD) {}
+
+void ValueEnumerator::EnumerateDILocalVariable(const DILocalVariable *MD) {
+  //! 7 = metadata !{
+  //  i32,      ;; Tag (see below)
+  EnumerateDwarfTag(MD->getTag());
+  //  metadata, ;; Context
+  EnumerateMetadata(MD->getRawScope());
+  //  metadata, ;; Name
+  EnumerateMetadata(MD->getRawName());
+  //  metadata, ;; Reference to file where defined
+  EnumerateMetadata(MD->getRawFile());
+  //  i32,      ;; 24 bit - Line number where defined
+  //            ;; 8 bit - Argument number. 1 indicates 1st argument.
+  //  metadata, ;; Type descriptor
+  uint32_t LineNo = MD->getLine();
+  uint32_t ArgNo = MD->getArg();
+  EnumerateInt32((LineNo | (ArgNo << 24)));
+  //  i32,      ;; flags
+  EnumerateInt32(MD->getFlags());
+  //  metadata  ;; (optional) Reference to inline location
+  EnumerateMetadata(nullptr);
+  //}
+}
+
+void ValueEnumerator::EnumerateDIObjCProperty(const DIObjCProperty *MD) {}
+void ValueEnumerator::EnumerateDIImportedEntity(const DIImportedEntity *MD) {}
+void ValueEnumerator::EnumerateDIMacro(const DIMacro *MD) {}
+void ValueEnumerator::EnumerateDIMacroFile(const DIMacroFile *MD) {}
 
 /// EnumerateValueSymbolTable - Insert all of the values in the specified symbol
 /// table into the values table.
@@ -246,10 +484,29 @@ void ValueEnumerator::EnumerateMDNodeOperands(const MDNode *N) {
   }
 }
 
+void ValueEnumerator::EnumerateMDNode(const MDNode *MD) {
+  switch (MD->getMetadataID()) {
+  default:
+    llvm_unreachable("Invalid MDNode subclass");
+#define HANDLE_SPECIALIZED_MDNODE_LEAF(CLASS)                                  \
+  case Metadata::CLASS##Kind:                                                  \
+    Enumerate##CLASS(cast<CLASS>(MD));                                         \
+    break;
+#define HANDLE_MDNODE_LEAF(CLASS)                                              \
+  case Metadata::CLASS##Kind:                                                  \
+    Enumerate##CLASS(cast<CLASS>(MD));                                         \
+    break;
+#include "llvm/IR/Metadata.def"
+  }
+}
+
 void ValueEnumerator::EnumerateMetadata(const Metadata *MD) {
+  if (MD == nullptr)
+    return;
+
   assert(
-    (isa<MDNode>(MD) || isa<MDString>(MD) || isa<ConstantAsMetadata>(MD)) &&
-    "Invalid metadata kind");
+      (isa<MDNode>(MD) || isa<MDString>(MD) || isa<ConstantAsMetadata>(MD)) &&
+      "Invalid metadata kind");
 
   // Insert a dummy ID to block the co-recursive call to
   // EnumerateMDNodeOperands() from re-visiting MD in a cyclic graph.
@@ -260,7 +517,7 @@ void ValueEnumerator::EnumerateMetadata(const Metadata *MD) {
 
   // Visit operands first to minimize RAUW.
   if (auto *N = dyn_cast<MDNode>(MD))
-    EnumerateMDNodeOperands(N);
+    EnumerateMDNode(N);
   else if (auto *C = dyn_cast<ConstantAsMetadata>(MD))
     EnumerateValue(C->getValue());
 
@@ -275,7 +532,8 @@ void ValueEnumerator::EnumerateMetadata(const Metadata *MD) {
 
 /// EnumerateFunctionLocalMetadataa - Incorporate function-local metadata
 /// information reachable from the given MDNode.
-void ValueEnumerator::EnumerateFunctionLocalMetadata(const LocalAsMetadata *Local) {
+void ValueEnumerator::EnumerateFunctionLocalMetadata(
+    const LocalAsMetadata *Local) {
   // Check to see if it's already in!
   unsigned &MDValueID = MDValueMap[Local];
   if (MDValueID)
@@ -298,7 +556,7 @@ void ValueEnumerator::EnumerateValue(const Value *V) {
   unsigned &ValueID = ValueMap[V];
   if (ValueID) {
     // Increment use count.
-    Values[ValueID-1].second++;
+    Values[ValueID - 1].second++;
     return;
   }
 
@@ -317,8 +575,8 @@ void ValueEnumerator::EnumerateValue(const Value *V) {
       // itself.  This makes it more likely that we can avoid forward references
       // in the reader.  We know that there can be no cycles in the constants
       // graph that don't go through a global variable.
-      for (User::const_op_iterator I = C->op_begin(), E = C->op_end();
-           I != E; ++I)
+      for (User::const_op_iterator I = C->op_begin(), E = C->op_end(); I != E;
+           ++I)
         if (!isa<BasicBlock>(*I)) // Don't enumerate BB operand to BlockAddress.
           EnumerateValue(*I);
 
@@ -335,7 +593,6 @@ void ValueEnumerator::EnumerateValue(const Value *V) {
   ValueID = Values.size();
 }
 
-
 void ValueEnumerator::EnumerateType(Type *Ty) {
   unsigned *TypeID = &TypeMap[Ty];
 
@@ -349,16 +606,16 @@ void ValueEnumerator::EnumerateType(Type *Ty) {
   if (StructType *STy = dyn_cast<StructType>(Ty))
     if (!STy->isLiteral())
       *TypeID = ~0U;
-  
+
   // Enumerate all of the subtypes before we enumerate this type.  This ensures
   // that the type will be enumerated in an order that can be directly built.
   for (Type::subtype_iterator I = Ty->subtype_begin(), E = Ty->subtype_end();
        I != E; ++I)
     EnumerateType(*I);
-  
+
   // Refresh the TypeID pointer in case the table rehashed.
   TypeID = &TypeMap[Ty];
-  
+
   // Check to see if we got the pointer another way.  This can happen when
   // enumerating recursive types that hit the base case deeper than they start.
   //
@@ -366,10 +623,10 @@ void ValueEnumerator::EnumerateType(Type *Ty) {
   // then emit the definition now that all of its contents are available.
   if (*TypeID && *TypeID != ~0U)
     return;
-  
+
   // Add this type now that its contents are all happily enumerated.
   Types.push_back(Ty);
-  
+
   *TypeID = Types.size();
 }
 
@@ -380,7 +637,7 @@ void ValueEnumerator::EnumerateOperandType(const Value *V) {
 
   if (auto *MD = dyn_cast<MetadataAsValue>(V)) {
     assert(!isa<LocalAsMetadata>(MD->getMetadata()) &&
-      "Function-local metadata should be left for later");
+           "Function-local metadata should be left for later");
     EnumerateMetadata(MD->getMetadata());
     return;
   }
@@ -393,22 +650,23 @@ void ValueEnumerator::EnumerateOperandType(const Value *V) {
   if (ValueMap.count(C))
     return;
 
-
   // This constant may have operands, make sure to enumerate the types in
   // them.
   for (unsigned i = 0, e = C->getNumOperands(); i != e; ++i) {
     const Value *Op = C->getOperand(i);
-      
+
     // Don't enumerate basic blocks here, this happens as operands to
     // blockaddress.
-    if (isa<BasicBlock>(Op)) continue;
-      
+    if (isa<BasicBlock>(Op))
+      continue;
+
     EnumerateOperandType(Op);
   }
 }
 
 void ValueEnumerator::EnumerateAttributes(const AttributeSet &PAL) {
-  if (PAL.isEmpty()) return;  // null is always 0.
+  if (PAL.isEmpty())
+    return; // null is always 0.
   // Do a lookup.
   unsigned &Entry = AttributeMap[PAL.getRawPointer()];
   if (Entry == 0) {
@@ -433,8 +691,7 @@ void ValueEnumerator::incorporateFunction(const Function &F) {
   for (auto &BB : F) {
     for (auto &I : BB)
       for (auto &O : I.operands()) {
-        if ((isa<Constant>(O) && !isa<GlobalValue>(O)) ||
-            isa<InlineAsm>(O))
+        if ((isa<Constant>(O) && !isa<GlobalValue>(O)) || isa<InlineAsm>(O))
           EnumerateValue(O);
       }
     BasicBlocks.push_back(&BB);
@@ -450,7 +707,7 @@ void ValueEnumerator::incorporateFunction(const Function &F) {
 
   FirstInstID = Values.size();
 
-  SmallVector<LocalAsMetadata  *, 8> FnLocalMDVector;
+  SmallVector<LocalAsMetadata *, 8> FnLocalMDVector;
   // Add all of the instructions.
   for (auto &BB : F) {
     for (auto &I : BB) {
@@ -460,7 +717,7 @@ void ValueEnumerator::incorporateFunction(const Function &F) {
             // Enumerate metadata after the instructions they might refer to.
             FnLocalMDVector.push_back(Local);
       }
-        
+
       if (!I.getType()->isVoidTy())
         EnumerateValue(&I);
     }
@@ -475,8 +732,10 @@ void ValueEnumerator::purgeFunction() {
   /// Remove purged values from the ValueMap.
   for (unsigned i = NumModuleValues, e = Values.size(); i != e; ++i)
     ValueMap.erase(Values[i].first);
+
   for (unsigned i = NumModuleMDs, e = MDs.size(); i != e; ++i)
     MDValueMap.erase(MDs[i]);
+
   for (unsigned i = 0, e = BasicBlocks.size(); i != e; ++i)
     ValueMap.erase(BasicBlocks[i]);
 
@@ -486,8 +745,8 @@ void ValueEnumerator::purgeFunction() {
   FunctionLocalMDs.clear();
 }
 
-static void IncorporateFunctionInfoGlobalBBIDs(const Function *F,
-                                 DenseMap<const BasicBlock*, unsigned> &IDMap) {
+static void IncorporateFunctionInfoGlobalBBIDs(
+    const Function *F, DenseMap<const BasicBlock *, unsigned> &IDMap) {
   unsigned Counter = 0;
   for (auto &BB : *F)
     IDMap[&BB] = ++Counter;
@@ -499,9 +758,8 @@ static void IncorporateFunctionInfoGlobalBBIDs(const Function *F,
 unsigned ValueEnumerator::getGlobalBasicBlockID(const BasicBlock *BB) const {
   unsigned &Idx = GlobalBasicBlockIDs[BB];
   if (Idx != 0)
-    return Idx-1;
+    return Idx - 1;
 
   IncorporateFunctionInfoGlobalBBIDs(BB->getParent(), GlobalBasicBlockIDs);
   return getGlobalBasicBlockID(BB);
 }
-
