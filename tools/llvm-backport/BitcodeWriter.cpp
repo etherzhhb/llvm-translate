@@ -1811,9 +1811,6 @@ static void WriteFunction(const Function &F, ValueEnumerator &VE,
       Stream.EmitRecord(bitc::FUNC_CODE_DEBUG_LOC, Vals);
       Vals.clear();
 
-      Stream.EmitRecord(bitc::FUNC_CODE_DEBUG_LOC, Vals);
-      Vals.clear();
-
       LastDL = DL;
     }
 
