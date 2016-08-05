@@ -719,7 +719,18 @@ struct MDEmitter {
   }
 
   void emitDIFile() {
-    //llvm_unreachable("Not supported!");
+    const auto *N = cast<DIFile>(Node);
+    //!0 = metadata !{
+    //  i32,       ;; Tag = 41 + LLVMDebugVersion
+    //             ;; (DW_TAG_file_type)
+    writeDwarfTag(N->getTag());
+    //  metadata,  ;; Source file name
+    writeMetadata(N->getRawFilename());
+    //  metadata,  ;; Source file directory (includes trailing slash)
+    writeMetadata(N->getRawDirectory());
+    //  metadata   ;; Unused
+    writeMetadata(nullptr);
+    //}
   }
 
   void emitDICompileUnit() {

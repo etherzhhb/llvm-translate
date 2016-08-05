@@ -327,7 +327,19 @@ void ValueEnumerator::EnumerateDISubroutineType(const DISubroutineType *MD) {
   EnumerateDICompositeTypeBase(MD, nullptr, MD->getRawTypeArray(), 0);
 }
 
-void ValueEnumerator::EnumerateDIFile(const DIFile *MD) { MD->dump(); }
+void ValueEnumerator::EnumerateDIFile(const DIFile *MD) { 
+  //!0 = metadata !{
+  //  i32,       ;; Tag = 41 + LLVMDebugVersion
+  //             ;; (DW_TAG_file_type)
+  EnumerateDwarfTag(MD->getTag());
+  //  metadata,  ;; Source file name
+  EnumerateMetadata(MD->getRawFilename());
+  //  metadata,  ;; Source file directory (includes trailing slash)
+  EnumerateMetadata(MD->getRawDirectory());
+  //  metadata   ;; Unused
+  EnumerateMetadata(nullptr);
+  //}
+}
 
 void ValueEnumerator::EnumerateDICompileUnit(const DICompileUnit *MD) {
   //! 0 = metadata !{
