@@ -567,19 +567,22 @@ static uint64_t GetOptimizationFlags(const Value *V) {
 }
 
 namespace {
-struct MDOperandWriter {
+struct MDEmitter {
+  const MDNode *Node;
   LLVMContext &C;
   const ValueEnumerator &VE;
   BitstreamWriter &Stream;
   SmallVectorImpl<uint64_t> &Record;
+  const unsigned Abbrev;
 
-  MDOperandWriter(LLVMContext &C, const ValueEnumerator &VE,
-                  BitstreamWriter &Stream,
-                  SmallVectorImpl<uint64_t> &Record)
-      : C(C), VE(VE), Stream(Stream), Record(Record) {}
+  MDEmitter(const MDNode *N, const ValueEnumerator &VE,
+            BitstreamWriter &Stream, SmallVectorImpl<uint64_t> &Record,
+            unsigned Abbrev)
+      : Node(N), C(N->getContext()), VE(VE), Stream(Stream), Record(Record),
+        Abbrev(Abbrev) {}
 
-  ~MDOperandWriter() {
-    Stream.EmitRecord(bitc::METADATA_NODE, Record, 0);
+  ~MDEmitter() {
+    Stream.EmitRecord(bitc::METADATA_NODE, Record, Abbrev);
     Record.clear();
   }
 
@@ -623,367 +626,277 @@ struct MDOperandWriter {
     Record.push_back(VE.getTypeID(V->getType()));
     Record.push_back(VE.getValueID(V));
   }
-};
-}
 
-static void WriteDICompositeTypeBase(const DIType *N,
-                                     Metadata *ParentType,
-                                     Metadata *MemberTypes,
-                                     uint32_t RuntimeLanguage,
-                                     const ValueEnumerator &VE,
-                                     BitstreamWriter &Stream,
-                                     SmallVectorImpl<uint64_t> &Record,
-                                     unsigned Abbrev) {
-  MDOperandWriter OW(N->getContext(), VE, Stream, Record);
-  //!6 = metadata !{
-  //  i32,      ;; Tag (see below)
-  OW.writeDwarfTag(N->getTag());
-  //  metadata, ;; Reference to context
-  OW.writeMetadata(N->getRawScope());
-  //  metadata, ;; Name (may be "" for anonymous types)
-  OW.writeMetadata(N->getRawName());
-  //  metadata, ;; Reference to file where defined (may be NULL)
-  OW.writeMetadata(N->getRawFile());
-  //  i32,      ;; Line number where defined (may be 0)
-  OW.writeInt32(N->getLine());
-  //  i64,      ;; Size in bits
-  OW.writeInt64(N->getSizeInBits());
-  //  i64,      ;; Alignment in bits
-  OW.writeInt64(N->getAlignInBits());
-  //  i64,      ;; Offset in bits
-  OW.writeInt64(N->getOffsetInBits());
-  //  i32,      ;; Flags
-  OW.writeInt32(N->getFlags());
-  //  metadata, ;; Reference to type derived from
-  OW.writeMetadata(ParentType);
-  //  metadata, ;; Reference to array of member descriptors
-  OW.writeMetadata(MemberTypes);
-  //  i32       ;; Runtime languages
-  OW.writeInt32(RuntimeLanguage);
-}
+  void emitDICompositeTypeBase(const DIType *N,
+                               Metadata *ParentType,
+                               Metadata *MemberTypes,
+                               uint32_t RuntimeLanguage) {
+    //!6 = metadata !{
+    //  i32,      ;; Tag (see below)
+    writeDwarfTag(N->getTag());
+    //  metadata, ;; Reference to context
+    writeMetadata(N->getRawScope());
+    //  metadata, ;; Name (may be "" for anonymous types)
+    writeMetadata(N->getRawName());
+    //  metadata, ;; Reference to file where defined (may be NULL)
+    writeMetadata(N->getRawFile());
+    //  i32,      ;; Line number where defined (may be 0)
+    writeInt32(N->getLine());
+    //  i64,      ;; Size in bits
+    writeInt64(N->getSizeInBits());
+    //  i64,      ;; Alignment in bits
+    writeInt64(N->getAlignInBits());
+    //  i64,      ;; Offset in bits
+    writeInt64(N->getOffsetInBits());
+    //  i32,      ;; Flags
+    writeInt32(N->getFlags());
+    //  metadata, ;; Reference to type derived from
+    writeMetadata(ParentType);
+    //  metadata, ;; Reference to array of member descriptors
+    writeMetadata(MemberTypes);
+    //  i32       ;; Runtime languages
+    writeInt32(RuntimeLanguage);
+  }
 
-static void WriteDILocation(const DILocation *N, const ValueEnumerator &VE,
-                            BitstreamWriter &Stream,
-                            SmallVectorImpl<uint64_t> &Record,
-                            unsigned Abbrev) {
-  llvm_unreachable("Not supported!");
-}
+  void emitDILocation() {
+    llvm_unreachable("Not supported!");
+  }
 
-static void WriteDIExpression(const DIExpression *N, const ValueEnumerator &VE,
-                              BitstreamWriter &Stream,
-                              SmallVectorImpl<uint64_t> &Record,
-                              unsigned Abbrev) {
-  MDOperandWriter OW(N->getContext(), VE, Stream, Record);
-  // Do not write any operand.
-}
+  void emitDIExpression() {
+    // Do not write any operand.
+  }
 
-static void WriteGenericDINode(const GenericDINode *N,
-                               const ValueEnumerator &VE,
-                               BitstreamWriter &Stream,
-                               SmallVectorImpl<uint64_t> &Record,
-                               unsigned Abbrev) {
-  llvm_unreachable("Not supported!");
-}
+  void emitGenericDINode() {
+    llvm_unreachable("Not supported!");
+  }
 
-static void WriteDISubrange(const DISubrange *N, const ValueEnumerator &VE,
-                            BitstreamWriter &Stream,
-                            SmallVectorImpl<uint64_t> &Record,
-                            unsigned Abbrev) {
-  llvm_unreachable("Not supported!");
-}
+  void emitDISubrange() {
+    llvm_unreachable("Not supported!");
+  }
 
-static void WriteDIEnumerator(const DIEnumerator *N, const ValueEnumerator &VE,
-                              BitstreamWriter &Stream,
-                              SmallVectorImpl<uint64_t> &Record,
-                              unsigned Abbrev) {
-  llvm_unreachable("Not supported!");
-}
+  void emitDIEnumerator() {
+    llvm_unreachable("Not supported!");
+  }
 
-static void WriteDIBasicType(const DIBasicType *N, const ValueEnumerator &VE,
-                             BitstreamWriter &Stream,
-                             SmallVectorImpl<uint64_t> &Record,
-                             unsigned Abbrev) {
-  MDOperandWriter OW(N->getContext(), VE, Stream, Record);
-  //!4 = metadata !{
-  //  i32,      ;; Tag = 36 + LLVMDebugVersion
-  OW.writeDwarfTag(N->getTag());
-  //            ;; (DW_TAG_base_type)
-  //  metadata, ;; Reference to context
-  OW.writeMetadata(N->getRawScope());
-  //  metadata, ;; Name (may be "" for anonymous types)
-  OW.writeMetadata(N->getRawName());
-  //  metadata, ;; Reference to file where defined (may be NULL)
-  OW.writeMetadata(N->getRawFile());
-  //  i32,      ;; Line number where defined (may be 0)
-  OW.writeInt32(N->getLine());
-  //  i64,      ;; Size in bits
-  OW.writeInt64(N->getSizeInBits());
-  //  i64,      ;; Alignment in bits
-  OW.writeInt64(N->getAlignInBits());
-  //  i64,      ;; Offset in bits
-  OW.writeInt64(N->getOffsetInBits());
-  //  i32,      ;; Flags
-  OW.writeInt32(N->getFlags());
-  //  i32       ;; DWARF type encoding
-  OW.writeInt32(N->getEncoding());
-  //}
-}
+  void emitDIBasicType() {
+    const auto *N = cast<DIBasicType>(Node);
+    //!4 = metadata !{
+    //  i32,      ;; Tag = 36 + LLVMDebugVersion
+    writeDwarfTag(N->getTag());
+    //            ;; (DW_TAG_base_type)
+    //  metadata, ;; Reference to context
+    writeMetadata(N->getRawScope());
+    //  metadata, ;; Name (may be "" for anonymous types)
+    writeMetadata(N->getRawName());
+    //  metadata, ;; Reference to file where defined (may be NULL)
+    writeMetadata(N->getRawFile());
+    //  i32,      ;; Line number where defined (may be 0)
+    writeInt32(N->getLine());
+    //  i64,      ;; Size in bits
+    writeInt64(N->getSizeInBits());
+    //  i64,      ;; Alignment in bits
+    writeInt64(N->getAlignInBits());
+    //  i64,      ;; Offset in bits
+    writeInt64(N->getOffsetInBits());
+    //  i32,      ;; Flags
+    writeInt32(N->getFlags());
+    //  i32       ;; DWARF type encoding
+    writeInt32(N->getEncoding());
+    //}
+  }
 
-static void WriteDIDerivedType(const DIDerivedType *N,
-                               const ValueEnumerator &VE,
-                               BitstreamWriter &Stream,
-                               SmallVectorImpl<uint64_t> &Record,
-                               unsigned Abbrev) {
-  llvm_unreachable("Not supported!");
-}
+  void emitDIDerivedType() {
+    llvm_unreachable("Not supported!");
+  }
 
-static void WriteDICompositeType(const DICompositeType *N,
-                                 const ValueEnumerator &VE,
-                                 BitstreamWriter &Stream,
-                                 SmallVectorImpl<uint64_t> &Record,
-                                 unsigned Abbrev) {
-  llvm_unreachable("Not supported!");
-}
+  void emitDICompositeType() {
+    llvm_unreachable("Not supported!");
+  }
 
-static void WriteDISubroutineType(const DISubroutineType *N,
-                                  const ValueEnumerator &VE,
-                                  BitstreamWriter &Stream,
-                                  SmallVectorImpl<uint64_t> &Record,
-                                  unsigned Abbrev) {
-  WriteDICompositeTypeBase(N, nullptr, N->getRawTypeArray(), 0, VE, Stream,
-                           Record, Abbrev);
-}
+  void emitDISubroutineType() {
+    const auto *N = cast<DISubroutineType>(Node);
+    emitDICompositeTypeBase(N, nullptr, N->getRawTypeArray(), 0);
+  }
 
-static void WriteDIFile(const DIFile *N, const ValueEnumerator &VE,
-                        BitstreamWriter &Stream,
-                        SmallVectorImpl<uint64_t> &Record, unsigned Abbrev) {
-  //llvm_unreachable("Not supported!");
-}
+  void emitDIFile() {
+    //llvm_unreachable("Not supported!");
+  }
 
-static void WriteDICompileUnit(const DICompileUnit *N,
-                               const ValueEnumerator &VE,
-                               BitstreamWriter &Stream,
-                               SmallVectorImpl<uint64_t> &Record,
-                               unsigned Abbrev) {
-  MDOperandWriter OW(N->getContext(), VE, Stream, Record);
-  //!0 = metadata !{
-  //  i32, ;; Tag = 17 + LLVMDebugVersion
-  //       ;; (DW_TAG_compile_unit)
-  OW.writeDwarfTag(N->getTag());
-  //  i32, ;; Unused field.
-  OW.writeInt32(0);
-  //  i32, ;; DWARF language identifier(ex.DW_LANG_C89)
-  OW.writeInt32(N->getSourceLanguage());
-  //  metadata, ;; Source file name
-  OW.writeMDString(N->getFilename());
-  //  metadata, ;; Source file directory(includes trailing slash)
-  OW.writeMDString(N->getDirectory());
-  //  metadata;; Producer(ex. "4.0.1 LLVM (LLVM research group)")
-  OW.writeMDString(N->getProducer());
-  //  i1, ;; True if this is a main compile unit.
-  OW.writeBool(1);
-  //  i1, ;; True if this is optimized.
-  OW.writeBool(N->isOptimized());
-  //  metadata, ;; Flags
-  OW.writeMetadata(N->getRawFlags());
-  //  i32;; Runtime version
-  OW.writeInt32(N->getRuntimeVersion());
-  //  metadata;; List of enums types
-  OW.writeMetadata(N->getRawEnumTypes());
-  //  metadata;; List of retained types
-  OW.writeMetadata(N->getRawRetainedTypes());
-  //  metadata;; List of subprograms
-  OW.writeMetadata(nullptr);
-  //  metadata;; List of global variables
-  OW.writeMetadata(N->getRawGlobalVariables());
-  //}
-}
+  void emitDICompileUnit() {
+    const auto *N = cast<DICompileUnit>(Node);
+    //!0 = metadata !{
+    //  i32, ;; Tag = 17 + LLVMDebugVersion
+    //       ;; (DW_TAG_compile_unit)
+    writeDwarfTag(N->getTag());
+    //  i32, ;; Unused field.
+    writeInt32(0);
+    //  i32, ;; DWARF language identifier(ex.DW_LANG_C89)
+    writeInt32(N->getSourceLanguage());
+    //  metadata, ;; Source file name
+    writeMDString(N->getFilename());
+    //  metadata, ;; Source file directory(includes trailing slash)
+    writeMDString(N->getDirectory());
+    //  metadata;; Producer(ex. "4.0.1 LLVM (LLVM research group)")
+    writeMDString(N->getProducer());
+    //  i1, ;; True if this is a main compile unit.
+    writeBool(1);
+    //  i1, ;; True if this is optimized.
+    writeBool(N->isOptimized());
+    //  metadata, ;; Flags
+    writeMetadata(N->getRawFlags());
+    //  i32;; Runtime version
+    writeInt32(N->getRuntimeVersion());
+    //  metadata;; List of enums types
+    writeMetadata(N->getRawEnumTypes());
+    //  metadata;; List of retained types
+    writeMetadata(N->getRawRetainedTypes());
+    //  metadata;; List of subprograms
+    writeMetadata(nullptr);
+    //  metadata;; List of global variables
+    writeMetadata(N->getRawGlobalVariables());
+    //}
+  }
 
-static void WriteDISubprogram(const DISubprogram *N, const ValueEnumerator &VE,
-                              BitstreamWriter &Stream,
-                              SmallVectorImpl<uint64_t> &Record,
-                              unsigned Abbrev) {
-  MDOperandWriter OW(N->getContext(), VE, Stream, Record);
-  //!2 = metadata !{
-  //  i32,      ;; Tag = 46 + LLVMDebugVersion
-  //            ;; (DW_TAG_subprogram)
-  OW.writeDwarfTag(N->getTag());
-  //  i32,      ;; Unused field.
-  OW.writeInt32(0);
-  //  metadata, ;; Reference to context descriptor
-  OW.writeMetadata(N->getRawScope());
-  //  metadata, ;; Name
-  OW.writeMDString(N->getName());
-  //  metadata, ;; Display name (fully qualified C++ name)
-  OW.writeMDString(N->getDisplayName());
-  //  metadata, ;; MIPS linkage name (for C++)
-  OW.writeMetadata(N->getRawLinkageName());
-  //  metadata, ;; Reference to file where defined
-  OW.writeMetadata(N->getRawFile());
-  //  i32,      ;; Line number where defined
-  OW.writeInt32(N->getLine());
-  //  metadata, ;; Reference to type descriptor
-  OW.writeMetadata(N->getRawType());
-  //  i1,       ;; True if the global is local to compile unit (static)
-  OW.writeBool(N->isLocalToUnit());
-  //  i1,       ;; True if the global is defined in the compile unit (not extern)
-  OW.writeBool(N->isDefinition());
-  //  i32,      ;; Line number where the scope of the subprogram begins
-  OW.writeInt32(N->getScopeLine());
-  //  i32,      ;; Virtuality, e.g. dwarf::DW_VIRTUALITY__virtual
-  OW.writeInt32(N->getVirtuality());
-  //  i32,      ;; Index into a virtual function
-  OW.writeInt32(N->getVirtualIndex());
-  //  metadata, ;; indicates which base type contains the vtable pointer for the
-  //            ;; derived class
-  OW.writeMetadata(N->getRawContainingType());
-  //  i32,      ;; Flags - Artifical, Private, Protected, Explicit, Prototyped.
-  OW.writeInt32(N->getFlags());
-  //  i1,       ;; isOptimized
-  OW.writeBool(N->isOptimized());
-  //  Function *,;; Pointer to LLVM function
-  OW.writeValue(const_cast<Function*>(VE.getFunction(N)));
-  //  metadata, ;; Lists function template parameters
-  OW.writeMetadata(N->getRawTemplateParams());
-  //  metadata  ;; Function declaration descriptor
-  OW.writeMetadata(N->getRawDeclaration());
-  //  metadata  ;; List of function variables
-  OW.writeMetadata(N->getRawVariables());
-  //}
-}
+  void emitDISubprogram() {
+    const auto *N = cast<DISubprogram>(Node);
+    //!2 = metadata !{
+    //  i32,      ;; Tag = 46 + LLVMDebugVersion
+    //            ;; (DW_TAG_subprogram)
+    writeDwarfTag(N->getTag());
+    //  i32,      ;; Unused field.
+    writeInt32(0);
+    //  metadata, ;; Reference to context descriptor
+    writeMetadata(N->getRawScope());
+    //  metadata, ;; Name
+    writeMDString(N->getName());
+    //  metadata, ;; Display name (fully qualified C++ name)
+    writeMDString(N->getDisplayName());
+    //  metadata, ;; MIPS linkage name (for C++)
+    writeMetadata(N->getRawLinkageName());
+    //  metadata, ;; Reference to file where defined
+    writeMetadata(N->getRawFile());
+    //  i32,      ;; Line number where defined
+    writeInt32(N->getLine());
+    //  metadata, ;; Reference to type descriptor
+    writeMetadata(N->getRawType());
+    //  i1,       ;; True if the global is local to compile unit (static)
+    writeBool(N->isLocalToUnit());
+    //  i1,       ;; True if the global is defined in the compile unit (not extern)
+    writeBool(N->isDefinition());
+    //  i32,      ;; Line number where the scope of the subprogram begins
+    writeInt32(N->getScopeLine());
+    //  i32,      ;; Virtuality, e.g. dwarf::DW_VIRTUALITY__virtual
+    writeInt32(N->getVirtuality());
+    //  i32,      ;; Index into a virtual function
+    writeInt32(N->getVirtualIndex());
+    //  metadata, ;; indicates which base type contains the vtable pointer for the
+    //            ;; derived class
+    writeMetadata(N->getRawContainingType());
+    //  i32,      ;; Flags - Artifical, Private, Protected, Explicit, Prototyped.
+    writeInt32(N->getFlags());
+    //  i1,       ;; isOptimized
+    writeBool(N->isOptimized());
+    //  Function *,;; Pointer to LLVM function
+    writeValue(const_cast<Function*>(VE.getFunction(N)));
+    //  metadata, ;; Lists function template parameters
+    writeMetadata(N->getRawTemplateParams());
+    //  metadata  ;; Function declaration descriptor
+    writeMetadata(N->getRawDeclaration());
+    //  metadata  ;; List of function variables
+    writeMetadata(N->getRawVariables());
+    //}
+  }
 
-static void WriteDILexicalBlock(const DILexicalBlock *N,
-                                const ValueEnumerator &VE,
-                                BitstreamWriter &Stream,
-                                SmallVectorImpl<uint64_t> &Record,
-                                unsigned Abbrev) {
-  llvm_unreachable("Not supported!");
-}
+  void emitDILexicalBlock() {
+    llvm_unreachable("Not supported!");
+  }
 
-static void WriteDILexicalBlockFile(const DILexicalBlockFile *N,
-                                    const ValueEnumerator &VE,
-                                    BitstreamWriter &Stream,
-                                    SmallVectorImpl<uint64_t> &Record,
-                                    unsigned Abbrev) {
-  llvm_unreachable("Not supported!");
-}
+  void emitDILexicalBlockFile() {
+    llvm_unreachable("Not supported!");
+  }
 
-static void WriteDINamespace(const DINamespace *N, const ValueEnumerator &VE,
-                             BitstreamWriter &Stream,
-                             SmallVectorImpl<uint64_t> &Record,
-                             unsigned Abbrev) {
-  llvm_unreachable("Not supported!");
-}
+  void emitDINamespace() {
+    llvm_unreachable("Not supported!");
+  }
 
-static void WriteDIModule(const DIModule *N, const ValueEnumerator &VE,
-                          BitstreamWriter &Stream,
-                          SmallVectorImpl<uint64_t> &Record, unsigned Abbrev) {
-  llvm_unreachable("Not supported!");
-}
+  void emitDIModule() {
+    llvm_unreachable("Not supported!");
+  }
 
-static void WriteDITemplateTypeParameter(const DITemplateTypeParameter *N,
-                                         const ValueEnumerator &VE,
-                                         BitstreamWriter &Stream,
-                                         SmallVectorImpl<uint64_t> &Record,
-                                         unsigned Abbrev) {
-  llvm_unreachable("Not supported!");
-}
+  void emitDITemplateTypeParameter() {
+    llvm_unreachable("Not supported!");
+  }
 
-static void WriteDITemplateValueParameter(const DITemplateValueParameter *N,
-                                         const ValueEnumerator &VE,
-                                         BitstreamWriter &Stream,
-                                         SmallVectorImpl<uint64_t> &Record,
-                                         unsigned Abbrev) {
-  llvm_unreachable("Not supported!");
-}
+  void emitDITemplateValueParameter() {
+    llvm_unreachable("Not supported!");
+  }
 
-static void WriteDIGlobalVariable(const DIGlobalVariable *N,
-                                  const ValueEnumerator &VE,
-                                  BitstreamWriter &Stream,
-                                  SmallVectorImpl<uint64_t> &Record,
-                                  unsigned Abbrev) {
-  llvm_unreachable("Not supported!");
-}
+  void emitDIGlobalVariable() {
+    llvm_unreachable("Not supported!");
+  }
 
-static void WriteDILocalVariable(const DILocalVariable *N,
-                                 const ValueEnumerator &VE,
-                                 BitstreamWriter &Stream,
-                                 SmallVectorImpl<uint64_t> &Record,
-                                 unsigned Abbrev) {
-  MDOperandWriter OW(N->getContext(), VE, Stream, Record);
-  //!7 = metadata !{
-  //  i32,      ;; Tag (see below)
-  OW.writeDwarfTag(N->getTag());
-  //  metadata, ;; Context
-  OW.writeMetadata(N->getRawScope());
-  //  metadata, ;; Name
-  OW.writeMetadata(N->getRawName());
-  //  metadata, ;; Reference to file where defined
-  OW.writeMetadata(N->getRawFile());
-  //  i32,      ;; 24 bit - Line number where defined
-  //            ;; 8 bit - Argument number. 1 indicates 1st argument.
-  //  metadata, ;; Type descriptor
-  uint32_t LineNo = N->getLine();
-  uint32_t ArgNo = N->getArg();
-  OW.writeInt32((LineNo | (ArgNo << 24)));
-  //  i32,      ;; flags
-  OW.writeInt32(N->getFlags());
-  //  metadata  ;; (optional) Reference to inline location
-  OW.writeMetadata(nullptr);
-  //}
-}
+  void emitDILocalVariable() {
+    const auto *N = cast<DILocalVariable>(Node);
+    //!7 = metadata !{
+    //  i32,      ;; Tag (see below)
+    writeDwarfTag(N->getTag());
+    //  metadata, ;; Context
+    writeMetadata(N->getRawScope());
+    //  metadata, ;; Name
+    writeMetadata(N->getRawName());
+    //  metadata, ;; Reference to file where defined
+    writeMetadata(N->getRawFile());
+    //  i32,      ;; 24 bit - Line number where defined
+    //            ;; 8 bit - Argument number. 1 indicates 1st argument.
+    //  metadata, ;; Type descriptor
+    uint32_t LineNo = N->getLine();
+    uint32_t ArgNo = N->getArg();
+    writeInt32((LineNo | (ArgNo << 24)));
+    //  i32,      ;; flags
+    writeInt32(N->getFlags());
+    //  metadata  ;; (optional) Reference to inline location
+    writeMetadata(nullptr);
+    //}
+  }
 
-static void WriteDIObjCProperty(const DIObjCProperty *N,
-                                const ValueEnumerator &VE,
-                                BitstreamWriter &Stream,
-                                SmallVectorImpl<uint64_t> &Record,
-                                unsigned Abbrev) {
-  llvm_unreachable("Not supported!");
-}
+  void emitDIObjCProperty() {
+    llvm_unreachable("Not supported!");
+  }
 
-static void WriteDIImportedEntity(const DIImportedEntity *N,
-                                  const ValueEnumerator &VE,
-                                  BitstreamWriter &Stream,
-                                  SmallVectorImpl<uint64_t> &Record,
-                                  unsigned Abbrev) {
-  llvm_unreachable("Not supported!");
-}
+  void emitDIImportedEntity() {
+    llvm_unreachable("Not supported!");
+  }
 
-static void WriteDIMacro(const DIMacro *N, const ValueEnumerator &VE,
-                         BitstreamWriter &Stream,
-                         SmallVectorImpl<uint64_t> &Record, unsigned Abbrev) {
-  llvm_unreachable("Not supported!");
-}
+  void emitDIMacro() {
+    llvm_unreachable("Not supported!");
+  }
 
-static void WriteDIMacroFile(const DIMacroFile *N, const ValueEnumerator &VE,
-                             BitstreamWriter &Stream,
-                             SmallVectorImpl<uint64_t> &Record,
-                             unsigned Abbrev) {
-  llvm_unreachable("Not supported!");
-}
+  void emitDIMacroFile() {
+    llvm_unreachable("Not supported!");
+  }
 
-static void WriteMDTuple(const MDTuple *N, const ValueEnumerator &VE,
-                         BitstreamWriter &Stream,
-                         SmallVectorImpl<uint64_t> &Record, unsigned Abbrev) {
-  for (unsigned i = 0, e = N->getNumOperands(); i != e; ++i) {
-    Metadata *MD = N->getOperand(i);
-    assert(!(MD && isa<LocalAsMetadata>(MD)) &&
-           "Unexpected function-local metadata");
-    if (!MD) {
-      // TODO(srhines): I don't believe this case can exist for RS.
-      Record.push_back(VE.getTypeID(llvm::Type::getVoidTy(N->getContext())));
-      Record.push_back(0);
-    } else if (const auto *MDC = dyn_cast<ConstantAsMetadata>(MD)) {
-      Record.push_back(VE.getTypeID(MDC->getType()));
-      Record.push_back(VE.getValueID(MDC->getValue()));
-    } else {
-      Record.push_back(
-          VE.getTypeID(Type::getMetadataTy(N->getContext())));
-      Record.push_back(VE.getMetadataID(MD));
+  void emitMDTuple() {
+    const auto *N = cast<MDTuple>(Node);
+    for (unsigned i = 0, e = N->getNumOperands(); i != e; ++i) {
+      Metadata *MD = N->getOperand(i);
+      assert(!(MD && isa<LocalAsMetadata>(MD)) &&
+             "Unexpected function-local metadata");
+      if (!MD) {
+        // TODO(srhines): I don't believe this case can exist for RS.
+        Record.push_back(VE.getTypeID(llvm::Type::getVoidTy(N->getContext())));
+        Record.push_back(0);
+      } else if (const auto *MDC = dyn_cast<ConstantAsMetadata>(MD)) {
+        Record.push_back(VE.getTypeID(MDC->getType()));
+        Record.push_back(VE.getValueID(MDC->getValue()));
+      } else {
+        Record.push_back(
+            VE.getTypeID(Type::getMetadataTy(N->getContext())));
+        Record.push_back(VE.getMetadataID(MD));
+      }
     }
   }
-  Stream.EmitRecord(bitc::METADATA_NODE, Record, Abbrev);
-  Record.clear();
+
+};
 }
 
 static void WriteValueAsMetadata(const ValueAsMetadata *MD,
@@ -1056,16 +969,19 @@ static void WriteModuleMetadata(const Module *M, const ValueEnumerator &VE,
       default:
         llvm_unreachable("Invalid MDNode subclass");
 #define HANDLE_SPECIALIZED_MDNODE_LEAF(CLASS)                                  \
-  case Metadata::CLASS##Kind:                                                  \
-    Write##CLASS(cast<CLASS>(N), VE, Stream, Record, 0 /*CLASS##Abbrev*/);     \
-    continue;
+  case Metadata::CLASS##Kind: {                                                \
+    MDEmitter(N, VE, Stream, Record, 0 /*CLASS##Abbrev*/).emit##CLASS();       \
+    continue;                                                                  \
+  }
 #define HANDLE_MDNODE_LEAF(CLASS)                                              \
-  case Metadata::CLASS##Kind:                                                  \
-    Write##CLASS(cast<CLASS>(N), VE, Stream, Record, CLASS##Abbrev);           \
-    continue;
+  case Metadata::CLASS##Kind: {                                                \
+    MDEmitter(N, VE, Stream, Record, CLASS##Abbrev).emit##CLASS();             \
+    continue;                                                                  \
+  }
 #include "llvm/IR/Metadata.def"
       }
     }
+
     if (const auto *MDC = dyn_cast<ConstantAsMetadata>(MD)) {
       WriteValueAsMetadata(MDC, VE, Stream, Record);
       continue;
